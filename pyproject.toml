@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "lintorn"
 # Le numéro vit dans UN seul fichier : src/lintorn/__init__.py. Le paquet le lit là.
 dynamic = ["version"]
-description = "Audits your code and the memory your AI assistant reads — and tells you when the two drift apart."
+description = "Vérifie que ta doc et la mémoire de ton IA disent encore la vérité sur ton code."
 readme = "README.md"
 requires-python = ">=3.11"          # tomllib (stdlib) pour lire [tool.lintorn]
 license = "AGPL-3.0-or-later"
@@ -24,6 +24,7 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
+  "Natural Language :: French",
   "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
   "Programming Language :: Python :: 3",
   "Topic :: Software Development :: Quality Assurance",
