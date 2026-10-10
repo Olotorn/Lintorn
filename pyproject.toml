@@ -1,0 +1,104 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lintorn"
+# Le numéro vit dans UN seul fichier : src/lintorn/__init__.py. Le paquet le lit là.
+dynamic = ["version"]
+description = "Audits your code and the memory your AI assistant reads — and tells you when the two drift apart."
+readme = "README.md"
+requires-python = ">=3.11"          # tomllib (stdlib) pour lire [tool.lintorn]
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Olotorn" }]
+keywords = ["lint", "audit", "code-quality", "llm", "ai-agents", "documentation"]
+
+# AUCUNE dépendance, et c'est un engagement, pas un hasard : Lintorn doit
+# pouvoir tourner dans un hook git avec n'importe quel python du système.
+# Tout ce qu'il lance (ruff, pytest, django) appartient au projet audité,
+# jamais à Lintorn — il les appelle s'ils sont là, il le dit s'ils manquent.
+dependencies = []
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://gitlab.com/DamXs/lintorn"
+Issues = "https://gitlab.com/DamXs/lintorn/-/issues"
+
+[project.scripts]
+lintorn = "lintorn.cli:main"
+
+[tool.hatch.version]
+path = "src/lintorn/__init__.py"
+
+# Les images du README vivent sur GitLab : inutile de les livrer dans chaque version.
+[tool.hatch.build.targets.sdist]
+exclude = ["docs/"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lintorn"]
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruff — Lintorn s'audite lui-meme, autant que le jeu de regles soit explicite
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "PL", "RUF"]
+
+ignore = [
+  # Les horodatages du rapport sont LOCAUX expres : ils s'adressent au dev
+  # qui vient de lancer l'outil, pas a un systeme distribue. Une date en UTC
+  # serait moins lisible pour lui, et n'apporterait rien.
+  "DTZ005", "DTZ011",
+  # Les messages d'erreur sont ecrits pour etre lus dans un terminal :
+  # les assembler hors de l'exception nuirait a la lisibilite du code.
+  "EM101", "EM102", "TRY003",
+  # `global` sur ERREUR_CONFIG : un module de configuration accumule ses
+  # avertissements au fil du chargement. L'alternative (une classe, un
+  # singleton) alourdirait un fichier qui doit rester lisible par tous.
+  "PLW0603",
+  # Reassigner la variable de boucle apres nettoyage (`ligne = ligne.strip()`)
+  # est ici plus lisible qu'un second nom qui ne veut rien dire de plus.
+  "PLW2901",
+  # Le CLI et le montage des commandes ont naturellement beaucoup de branches
+  # et d'arguments : les scinder pour satisfaire un compteur les rendrait
+  # plus durs a suivre, pas moins.
+  # (PLR0911 : `main()` aiguille vers 8 sous-commandes — un return par
+  #  sous-commande est exactement ce qui se lit le mieux.)
+  "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004",
+  # Les textes sont en francais : apostrophes typographiques et guillemets
+  # sont voulus, pas des caracteres « ambigus » a corriger.
+  "RUF001", "RUF002", "RUF003",
+  # `try/except: pass` explicite se lit mieux que `contextlib.suppress` pour
+  # qui decouvre le code.
+  "SIM105",
+]
+
+[tool.ruff.lint.isort]
+# `from .projet import git as git, IGNORES as IGNORES` : config/__init__.py
+# réexporte ses sous-modules. Sans ce réglage, chaque nom devient son propre
+# import — 190 lignes d'imports en tête du tableau de bord.
+combine-as-imports = true
+
+[tool.ruff.lint.per-file-ignores]
+# Des phrases francaises completes : les couper nuirait a leur lecture, et
+# c'est leur lecture qui fait tout l'interet de ce fichier.
+"src/lintorn/traductions.py" = ["E501"]
+# Les tests decrivent des cas : des noms longs et des chaines en dur y sont
+# la pour etre lus, pas pour etre factorises.
+"tests/*" = ["PLR2004", "S101"]

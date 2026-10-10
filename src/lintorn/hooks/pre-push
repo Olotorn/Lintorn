@@ -1,0 +1,257 @@
+#!/bin/sh
+#
+# Hook PRE-PUSH — Lintorn controle avant d'envoyer quoi que ce soit au depot distant.
+#
+# POURQUOI PRE-PUSH ET PAS PRE-COMMIT ?
+#   Un commit est local et se rattrape (`git commit --amend`, `git reset`).
+#   Un push est PUBLIC : une fois parti, c'est dans l'historique de tout le
+#   monde. Et ça n'alourdit pas chaque commit — on peut commiter dix fois et
+#   ne payer Lintorn qu'une seule fois.
+#
+# CE QU'IL FAIT
+#   1. calcule la liste des fichiers réellement poussés
+#   2. lance Lintorn, avec un focus sur CES fichiers
+#   3. si un contrôle bloquant est rouge → demande confirmation
+#
+# INSTALLATION (sur chaque clone, et après chaque mise à jour de Lintorn) :
+#   lintorn hook
+#
+#   ⚠️ Sans cette commande, git regarde dans .git/hooks/, n'y trouve rien, et
+#   le push part sans contrôle — sans un message. Ni cette copie ni le réglage
+#   `core.hooksPath` ne suivent un clone, et `pip install -U lintorn` ne
+#   touche pas à la copie : le contrôle « Hook pre-push » dit quand relancer.
+#
+# POUR TOUT COURT-CIRCUITER : git push --no-verify
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 0. SE PLACER DANS LE PROJET AUDITÉ
+# ─────────────────────────────────────────────────────────────────────────────
+# git lance ses hooks depuis le SOMMET du dépôt. Sur un monorepo, le
+# sous-projet où ce hook a été installé n'est donc pas le dossier courant :
+# Lintorn auditait la racine, n'y trouvait aucune configuration, et laissait
+# passer un push que les règles du sous-projet interdisaient.
+#
+# Le hook vit dans <projet>/.lintorn/hooks/ : deux niveaux au-dessus de lui,
+# c'est le projet. Vrai aussi quand projet et dépôt ne font qu'un.
+cd "$(dirname "$0")/../.." || exit 1
+
+# Se placer dans le projet NE SUFFIT PAS : sans consigne, Lintorn remonte
+# jusqu'au `.git`, donc jusqu'au sommet du dépôt. On lui nomme la racine à
+# auditer — celle où ce hook a été installé. Calculée à l'exécution : aucun
+# chemin de machine n'est écrit dans ce fichier.
+LINTORN_RACINE="$(pwd)"
+export LINTORN_RACINE
+# Dit à Lintorn que c'est le hook qui l'appelle : il répond alors 3 quand rien
+# ne bloque mais que des outils n'ont rien vérifié (pas d'accord, outil absent).
+LINTORN_HOOK=1
+export LINTORN_HOOK
+
+# COMMENT ON APPELLE LINTORN
+#
+# Il est installé par pip, donc normalement dans le PATH. Mais un hook git
+# tourne dans l'environnement du shell qui a lancé `git push` : si le venv
+# n'est pas activé (bouton de VS Code, IDE, tâche planifiée), la commande est
+# introuvable. On essaie les trois formes, puis on abandonne PROPREMENT —
+# un hook qui plante sur « command not found » bloquerait tous les push sans
+# jamais expliquer pourquoi.
+if command -v lintorn >/dev/null 2>&1; then
+    LINTORN="lintorn"
+elif python -c "import lintorn" >/dev/null 2>&1; then
+    LINTORN="python -m lintorn"
+elif python3 -c "import lintorn" >/dev/null 2>&1; then
+    LINTORN="python3 -m lintorn"
+else
+    echo ""
+    echo "── Lintorn introuvable — le push passe ──────────────────"
+    echo "   Le hook est branche, mais Lintorn n'est pas installe"
+    echo "   dans cet environnement :   pip install lintorn"
+    echo ""
+    exit 0
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. QUELS FICHIERS PARTENT DANS CE PUSH ?
+# ─────────────────────────────────────────────────────────────────────────────
+# git envoie au hook, sur son entrée standard, une ligne par branche poussée :
+#   <ref locale> <sha local> <ref distante> <sha distant>
+# Le sha distant vaut 000...0 quand la branche n'existe pas encore là-bas.
+FICHIERS=""
+ZERO="0000000000000000000000000000000000000000"
+
+# Le remote visé : git le passe en premier argument au hook.
+REMOTE="${1:-origin}"
+
+# LA BRANCHE PAR DÉFAUT DU REMOTE, pour comparer une branche neuve.
+#
+# ⚠️ Jamais un nom écrit en dur : `origin/main` n'existe pas sur un dépôt en
+# `master` ou en `development`. `merge-base` échouait, aucun fichier n'était
+# listé, et la ligne « Defauts dans les fichiers pousses » disparaissait du
+# rapport sans un mot.
+#
+# `refs/remotes/<remote>/HEAD` n'est posé que par `git clone` : un dépôt créé
+# sur place puis poussé ne l'a pas. On essaie alors `main` puis `master`, et
+# on le DIT — une comparaison faite sur un nom supposé doit se savoir.
+DEFAUT=""
+AVIS_DEFAUT=""
+REF_DEFAUT=$(git symbolic-ref -q "refs/remotes/$REMOTE/HEAD" 2>/dev/null)
+if [ -n "$REF_DEFAUT" ]; then
+    DEFAUT="${REF_DEFAUT#refs/remotes/}"
+else
+    for nom in main master; do
+        if git rev-parse -q --verify "refs/remotes/$REMOTE/$nom" >/dev/null 2>&1; then
+            DEFAUT="$REMOTE/$nom"
+            break
+        fi
+    done
+    CORRIGER="pour la fixer : git remote set-head $REMOTE --auto"
+    if [ -n "$DEFAUT" ]; then
+        AVIS_DEFAUT="Branche par defaut de $REMOTE inconnue : branche neuve comparee a $DEFAUT, suppose ($CORRIGER)."
+    else
+        AVIS_DEFAUT="Branche par defaut de $REMOTE inconnue : les fichiers d'une branche neuve ne peuvent pas etre listes, le focus est saute ($CORRIGER)."
+    fi
+fi
+AVIS=""
+
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ -z "$local_sha" ] && continue
+    if [ "$remote_sha" = "$ZERO" ]; then
+        # Branche neuve : on compare à la branche par défaut plutôt qu'à rien,
+        # sinon on listerait l'histoire entière du dépôt.
+        BASE=""
+        [ -n "$AVIS_DEFAUT" ] && AVIS="$AVIS_DEFAUT"
+        if [ -n "$DEFAUT" ]; then
+            BASE=$(git merge-base "$local_sha" "$DEFAUT" 2>/dev/null || echo "")
+            if [ -z "$BASE" ]; then
+                AVIS="Aucun ancetre commun avec $DEFAUT : les fichiers de la branche neuve ne peuvent pas etre listes, le focus est saute."
+            fi
+        fi
+    else
+        BASE="$remote_sha"
+    fi
+    if [ -n "$BASE" ]; then
+        # `--relative` et `-- .` : les chemins sortent relatifs au projet, et
+        # ceux des autres sous-projets d'un monorepo ne s'y mêlent pas.
+        #
+        # `core.quotePath=false` : sans lui, git rend un nom accentué sous la
+        # forme "src/fichier_\303\251xotique.py" — un nom qui ne désigne aucun
+        # fichier. Le focus ne le trouvait pas et annonçait « aucun defaut
+        # dedans » sur un fichier fautif.
+        NOUVEAUX=$(git -c core.quotePath=false diff --name-only --relative \
+                       "$BASE" "$local_sha" -- . 2>/dev/null)
+        # Séparés par des SAUTS DE LIGNE, jamais par des espaces : un espace
+        # dans un nom de fichier le coupait en deux, et aucune des deux
+        # moitiés ne désignait quoi que ce soit.
+        FICHIERS="$FICHIERS
+$NOUVEAUX"
+    fi
+done
+
+# Un nom par ligne → les arguments positionnels, qui savent porter un nom
+# contenant une espace. (`sh` n'a pas de tableaux ; c'est la façon POSIX.)
+ANCIEN_IFS=$IFS
+IFS='
+'
+set -f                      # pas de glob : un nom contenant `*` reste ce nom
+# shellcheck disable=SC2086
+set -- $FICHIERS
+set +f
+IFS=$ANCIEN_IFS
+
+echo ""
+echo "── Lintorn controle avant push ─────────────────────────────"
+if [ -n "$AVIS" ]; then
+    echo "   $AVIS"
+fi
+
+# --rapide : on saute pip-audit et vulture (lents, et non bloquants de toute
+# façon). Un push ne doit pas se transformer en pause café.
+if [ "$#" -gt 0 ]; then
+    # Les noms passent par l'ENTRÉE STANDARD, un par ligne — jamais en
+    # arguments. Sous Windows, une ligne de commande tient en 32 767
+    # caractères : un push de mille fichiers (le premier d'un projet, un venv
+    # commité par erreur) la dépassait, Lintorn ne démarrait même pas, et le
+    # push était refusé sans un mot d'explication. `printf` est interne au
+    # shell : lui n'a pas de limite. Et un fichier nommé `--help` ne peut plus
+    # être pris pour une option.
+    #
+    # `$LINTORN` reste NON protégé : il peut valoir `python -m lintorn`.
+    # shellcheck disable=SC2086
+    printf '%s\n' "$@" | $LINTORN --rapide --fichiers-stdin
+else
+    $LINTORN --rapide
+fi
+CODE=$?
+
+if [ $CODE -eq 0 ]; then
+    echo "── Lintorn OK, push autorise ─────────────────────────────"
+    echo ""
+    exit 0
+fi
+
+# 3 : rien ne bloque, mais des outils n'ont RIEN verifie. Le push passe — ce
+# n'est pas un rouge — mais la derniere ligne ne doit pas dire « OK ».
+if [ $CODE -eq 3 ]; then
+    echo "── Push autorise SANS verification complete ──────────────"
+    echo "   Des outils n'ont rien verifie (liste juste au-dessus)."
+    echo "   Le plus souvent : lancer une fois  lintorn confiance  dans un terminal."
+    echo ""
+    exit 0
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. ÇA COINCE — on demande, on n'impose pas
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "╔════════════════════════════════════════════════════════╗"
+echo "║  Des controles BLOQUANTS sont en alerte                ║"
+echo "╚════════════════════════════════════════════════════════╝"
+echo ""
+echo "  Detail complet : .lintorn/rapport.md"
+echo ""
+
+# git a déjà consommé l'entrée standard (la liste des refs) : pour poser une
+# question, il faut lire directement le terminal via /dev/tty.
+#
+# On ESSAIE de l'ouvrir plutôt que de tester son existence : dans un script
+# automatisé, le fichier /dev/tty existe mais ne s'ouvre pas.
+#
+# Le test se fait dans un SOUS-SHELL `( : < /dev/tty )` : une redirection qui
+# échoue affiche son erreur au moment où elle est appliquée, donc un
+# `2>/dev/null` posé après arriverait trop tard. En enfermant le tout dans un
+# sous-shell, le 2>/dev/null couvre bien l'ensemble.
+if ! ( : < /dev/tty ) 2>/dev/null; then
+    echo "  ────────────────────────────────────────────────────"
+    echo "  PUSH ANNULE : pas de terminal pour repondre."
+    echo ""
+    echo "  Tu pousses probablement depuis le bouton de VS Code."
+    echo "  VS Code lance git SANS terminal : impossible de poser"
+    echo "  la question, donc on annule par securite."
+    echo ""
+    echo "  POUR VOIR CE MESSAGE DANS VS CODE :"
+    echo "     Affichage > Sortie (Ctrl+Shift+U) > liste 'Git'"
+    echo ""
+    echo "  POUR DECIDER TOI-MEME, pousse depuis un terminal :"
+    echo "     git push"
+    echo ""
+    echo "  POUR PASSER OUTRE SANS DISCUTER :"
+    echo "     git push --no-verify"
+    echo "  ────────────────────────────────────────────────────"
+    echo ""
+    exit 1
+fi
+
+printf "  Pousser quand meme ? [o/N] "
+read -r REPONSE < /dev/tty
+
+case "$REPONSE" in
+    o|O|y|Y|oui|OUI)
+        echo "  -> Push force par l'utilisateur."
+        echo ""
+        exit 0
+        ;;
+    *)
+        echo "  -> Push ANNULE."
+        echo ""
+        exit 1
+        ;;
+esac
