@@ -19,7 +19,8 @@ import pytest
 
 import lintorn
 import lintorn.commandes
-from lintorn import config
+from lintorn import config, dependances, noyau
+from lintorn.outils import requirements
 
 # Un faux outil est un script sh : sous Windows, il ne se lance pas.
 _SANS_SH = pytest.mark.skipif(os.name == "nt", reason="le faux outil est un script sh")
@@ -399,7 +400,7 @@ def test_donnees_metier_force_sans_commande_dit_ce_qui_manque(tmp_path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# B7 — le hook compare une branche neuve à la branche par défaut DU REMOTE
+# B7 — une branche neuve : le hook liste ce que le distant n'a pas encore
 # ─────────────────────────────────────────────────────────────────────────────
 def _git(depot: Path, *arguments: str) -> str:
     return subprocess.run(["git", "-C", str(depot), "-c", "user.email=t@t", "-c", "user.name=t",
@@ -459,20 +460,15 @@ def test_le_hook_suit_la_branche_par_defaut_du_remote(tmp_path):
 
 
 @_SANS_SH
-def test_le_hook_annonce_le_repli_quand_origin_head_manque(tmp_path):
-    affiche, recus = _pousser(tmp_path, _depot_pousse(tmp_path, "master", cloner=False))
+@pytest.mark.parametrize("defaut", ["master", "trunk"])
+def test_sans_origin_head_la_branche_neuve_est_quand_meme_listee(tmp_path, defaut):
+    """Un dépôt créé sur place n'a pas `origin/HEAD` : le hook supposait `main`
+    ou `master`, et sur `trunk` ne listait rien. Ce que le distant n'a pas
+    encore ne dépend pas de sa branche par défaut."""
+    affiche, recus = _pousser(tmp_path, _depot_pousse(tmp_path, defaut, cloner=False))
 
     assert recus == ["nouveau.py"]
-    assert "origin/master" in affiche and "suppose" in affiche
-    assert "set-head" in affiche
-
-
-@_SANS_SH
-def test_le_hook_dit_quand_il_ne_peut_rien_comparer(tmp_path):
-    affiche, recus = _pousser(tmp_path, _depot_pousse(tmp_path, "trunk", cloner=False))
-
-    assert recus == []
-    assert "focus est saute" in affiche
+    assert "inconnue" not in affiche
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -603,6 +599,206 @@ def test_les_extras_ne_font_pas_un_paquet_absent(tmp_path):
 
     assert "PAS INSTALLES" not in sortie.stdout, sortie.stdout
     assert "DIVERGENTES" not in sortie.stdout, sortie.stdout
+
+
+def _installes() -> list[str]:
+    """Le `pip freeze` du python de ces tests, qui joue le venv du projet."""
+    sortie = subprocess.run([sys.executable, "-m", "pip", "freeze", "--local"],
+                            capture_output=True, text=True, timeout=120, check=True)
+    return [ligne for ligne in sortie.stdout.splitlines()
+            if "==" in ligne and not ligne.startswith(("#", "-"))]
+
+
+def _nom(ligne: str) -> str:
+    return re.sub(r"[-_.]+", "-", ligne.split("==", 1)[0]).lower()
+
+
+def _comparer(tmp_path, lignes: list[str]) -> subprocess.CompletedProcess:
+    (tmp_path / "requirements.txt").write_text("\n".join(lignes) + "\n", encoding="utf-8")
+    script = Path(lintorn.__file__).parent / "dependances.py"
+    return subprocess.run([sys.executable, str(script), str(tmp_path)],
+                          capture_output=True, text=True, timeout=120, check=False)
+
+
+def test_les_outils_d_audit_ne_sont_pas_des_dependances_oubliees(tmp_path):
+    """`lintorn outils` les installe dans le venv : comptés « installés mais pas
+    déclarés », avec ce qu'ils tirent, ils faisaient refuser le premier push."""
+    for outil in ("ruff", "pytest", "vulture", "pip-audit"):
+        pytest.importorskip(outil.replace("-", "_"))
+    # Ni les outils, ni CacheControl et filelock, que pip-audit tire par
+    # `CacheControl[filecache]` : une option entre crochets.
+    retires = {"ruff", "pytest", "vulture", "pip-audit", "cachecontrol", "filelock"}
+
+    sortie = _comparer(tmp_path, [ligne for ligne in _installes() if _nom(ligne) not in retires])
+
+    assert sortie.returncode == 0, sortie.stdout
+    assert "PAS DECLARES" not in sortie.stdout, sortie.stdout
+    note = next(ligne for ligne in sortie.stdout.splitlines() if ligne.startswith("Non comptes"))
+    for nom in ("ruff", "pytest", "pip-audit", "filelock"):
+        assert nom in note, "ecarte, mais NOMME"
+
+
+def test_une_ligne_sans_version_declare_son_paquet(tmp_path):
+    """`certifi>=2020` était ignoré : certifi « installé mais pas déclaré », un
+    rouge bloquant ; et un paquet absent ainsi déclaré passait inaperçu."""
+    lignes = ["certifi>=2020" if _nom(ligne) == "certifi" else ligne for ligne in _installes()]
+    if "certifi>=2020" not in lignes:
+        pytest.skip("certifi absent du venv de test")
+
+    sortie = _comparer(tmp_path, [*lignes, "absent-zz>=1.0"])
+
+    assert sortie.returncode == 1
+    assert "PAS DECLARES" not in sortie.stdout, sortie.stdout
+    assert "PAS INSTALLES (1)" in sortie.stdout and "absent-zz>=1.0" in sortie.stdout
+
+
+def test_la_liste_des_outils_d_audit_suit_celle_de_lintorn_outils():
+    assert ({dependances.normaliser(o) for o in dependances.OUTILS_D_AUDIT}
+            == {o.replace("_", "-") for o in config.OUTILS_INSTALLABLES})
+
+
+def test_le_resume_des_dependances_dit_quel_ecart(tmp_path, monkeypatch):
+    """« 33 ligne(s) de sortie » ne disait pas pourquoi le push était refusé."""
+    (tmp_path / "requirements.txt").write_text(
+        "\n".join([*_installes(), "absent-zz==1.0"]) + "\n", encoding="utf-8")
+    for nom, valeur in (("RACINE", tmp_path), ("PYTHON", sys.executable),
+                        ("VENV_PROJET", tmp_path / ".venv"),
+                        ("REQUIREMENTS", tmp_path / "requirements.txt"),
+                        ("CONTROLES_INTERNES", {})):
+        monkeypatch.setattr(config, nom, valeur)
+    monkeypatch.setattr(config, "COMMANDES", [requirements.commande()])
+
+    resultat = noyau.executer()[0]
+
+    assert resultat.statut == "ALERTE"
+    assert resultat.resume == "1 declare(s) mais pas installe(s)"
+
+
+def test_un_paquet_que_le_code_importe_n_est_pas_excuse_par_les_outils(tmp_path, monkeypatch):
+    """`import pluggy` jamais déclaré : avant `lintorn outils`, « installe mais pas
+    declare » ; après, pytest tirant pluggy, « rien a signaler ». Le projet
+    plantait sur une machine neuve derrière un vert."""
+    pytest.importorskip("pluggy")
+    (tmp_path / "app.py").write_text("import os\nimport pluggy\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text(
+        "\n".join(ligne for ligne in _installes()
+                  if _nom(ligne) not in {"ruff", "pytest", "vulture", "pip-audit", "pluggy"})
+        + "\n", encoding="utf-8")
+    for nom, valeur in (("RACINE", tmp_path), ("PYTHON", sys.executable),
+                        ("VENV_PROJET", tmp_path / ".venv"),
+                        ("REQUIREMENTS", tmp_path / "requirements.txt"),
+                        ("CONTROLES_INTERNES", {})):
+        monkeypatch.setattr(config, nom, valeur)
+    monkeypatch.setattr(config, "COMMANDES", [requirements.commande()])
+
+    resultat = noyau.executer()[0]
+
+    assert resultat.statut == "ALERTE", resultat.detail
+    assert "- pluggy==" in resultat.detail and "(ton code l'importe)" in resultat.detail
+
+
+_SOUS_DEPENDANCES_DE_REQUESTS = {"certifi", "idna", "urllib3", "charset-normalizer"}
+
+
+def test_des_dependances_directes_seulement_ne_font_pas_signaler_leurs_sous_dependances(tmp_path):
+    """`requests>=2` sans certifi, idna, urllib3 : « 4 installe(s) mais pas
+    declare(s) », un rouge bloquant, alors que pip les installe partout."""
+    pytest.importorskip("requests")
+    retires = {"ruff", "pytest", "vulture", "pip-audit", *_SOUS_DEPENDANCES_DE_REQUESTS}
+
+    sortie = _comparer(tmp_path, [ligne for ligne in _installes() if _nom(ligne) not in retires])
+
+    assert sortie.returncode == 0, sortie.stdout
+    assert "PAS DECLARES" not in sortie.stdout, sortie.stdout
+    tires = next(ligne for ligne in sortie.stdout.splitlines() if ligne.startswith("Sans ligne"))
+    assert all(nom in tires for nom in _SOUS_DEPENDANCES_DE_REQUESTS), "pas comptes, mais NOMMES"
+
+
+def test_une_sous_dependance_que_le_code_importe_se_declare(tmp_path):
+    pytest.importorskip("requests")
+    (tmp_path / "app.py").write_text("import requests\nfrom urllib3 import util\n", encoding="utf-8")
+    retires = {"ruff", "pytest", "vulture", "pip-audit", *_SOUS_DEPENDANCES_DE_REQUESTS}
+
+    sortie = _comparer(tmp_path, [ligne for ligne in _installes() if _nom(ligne) not in retires])
+
+    assert "PAS DECLARES (1)" in sortie.stdout, sortie.stdout
+    assert "- urllib3==" in sortie.stdout and "(ton code l'importe)" in sortie.stdout
+
+
+def test_une_option_entre_crochets_sur_une_ligne_epinglee_compte(tmp_path):
+    """`CacheControl[filecache]==x` tire filelock ; `CacheControl==x` seul, non."""
+    for module in ("cachecontrol", "filelock"):
+        pytest.importorskip(module)
+    lignes = [ligne for ligne in _installes()
+              if _nom(ligne) not in {"ruff", "pytest", "vulture", "pip-audit", "filelock"}]
+    avec = [ligne.replace("==", "[filecache]==", 1) if _nom(ligne) == "cachecontrol" else ligne
+            for ligne in lignes]
+
+    sans_option = _comparer(tmp_path, lignes).stdout
+    avec_option = _comparer(tmp_path, avec).stdout
+
+    tires = [ligne for ligne in avec_option.splitlines() if ligne.startswith("Sans ligne")]
+    assert tires and "filelock" in tires[0], avec_option
+    assert not any(ligne.startswith("Sans ligne") and "filelock" in ligne
+                   for ligne in sans_option.splitlines()), sans_option
+
+
+def test_un_module_du_projet_n_est_pas_un_paquet_importe(tmp_path):
+    """`import tests` vise le dossier du projet ; `api/requests.py` ne cache pas `import requests`."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "api").mkdir()
+    (tmp_path / "api" / "requests.py").write_text("", encoding="utf-8")
+    (tmp_path / "app.py").write_text("import tests, os.path as p\nimport requests\n"
+                                     "from . import voisin\n", encoding="utf-8")
+
+    assert dependances.importes(tmp_path) == {"os", "requests"}
+
+
+def _dependances_par_le_noyau(tmp_path, monkeypatch, lignes: list[str]):
+    (tmp_path / "requirements.txt").write_text("\n".join(lignes) + "\n", encoding="utf-8")
+    for nom, valeur in (("RACINE", tmp_path), ("PYTHON", sys.executable),
+                        ("VENV_PROJET", tmp_path / ".venv"),
+                        ("REQUIREMENTS", tmp_path / "requirements.txt"),
+                        ("CONTROLES_INTERNES", {})):
+        monkeypatch.setattr(config, nom, valeur)
+    monkeypatch.setattr(config, "COMMANDES", [requirements.commande()])
+    return noyau.executer()[0]
+
+
+def test_au_vert_les_paquets_sans_ligne_restent_nommes(tmp_path, monkeypatch):
+    """« rien a signaler » seul : le rapport taisait les paquets laissés sans ligne."""
+    pytest.importorskip("requests")
+    retires = {"ruff", "pytest", "vulture", "pip-audit", *_SOUS_DEPENDANCES_DE_REQUESTS}
+
+    resultat = _dependances_par_le_noyau(
+        tmp_path, monkeypatch, [ligne for ligne in _installes() if _nom(ligne) not in retires])
+
+    assert resultat.statut == "OK", resultat.detail
+    assert "paquet(s) sans ligne, expliques dans le rapport" in resultat.resume
+    assert resultat.detail_meme_au_vert and "certifi" in resultat.detail
+
+
+def test_un_requirements_complet_reste_un_simple_vert(tmp_path, monkeypatch):
+    resultat = _dependances_par_le_noyau(tmp_path, monkeypatch, _installes())
+
+    assert resultat.statut == "OK", resultat.detail
+    assert resultat.resume == "rien a signaler"
+    assert not resultat.detail_meme_au_vert
+
+
+def test_le_resume_de_vulture_compte_ses_candidats(tmp_path, monkeypatch):
+    sortie = ("a.py:3: unused function 'f' (60% confidence)\n"
+              "b.py:9: unused variable 'x' (100% confidence)")
+    monkeypatch.setattr(config, "VENV_PROJET", tmp_path / ".venv")
+    monkeypatch.setattr(config, "CONTROLES_INTERNES", {})
+    monkeypatch.setattr(config, "COMMANDES", [{
+        "cle": "code_mort", "titre": "Code mort (vulture, consultatif)", "bloquant": False,
+        "cmd": [sys.executable, "-c", f"print({sortie!r}); raise SystemExit(3)"],
+        "cwd": tmp_path, "traduction": "vulture", "lent": False, "codes_alerte": (3,)}])
+
+    resultat = noyau.executer()[0]
+
+    assert resultat.resume == "2 candidat(s) de code mort - a confirmer a l'oeil"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

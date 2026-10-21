@@ -208,7 +208,7 @@ def _montrer(entree: dict) -> str:
 def demander(entrees: list[dict]) -> bool:
     """La question. Tout ce qui n'est pas un oui franc est un non."""
     print(f"\nLintorn a besoin de ton accord pour lancer ceci dans ce projet "
-          f"(dossier « {config.RACINE.name} ») :\n")
+          f"(dossier \"{config.RACINE.name}\") :\n")
     for entree in entrees:
         print(f"  {entree['titre']}")
         print(f"      {_montrer(entree)}")

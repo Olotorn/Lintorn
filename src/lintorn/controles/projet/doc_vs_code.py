@@ -110,7 +110,7 @@ def _verifier_documents(titre: str, documents: list, bloquant_possible: bool,
     if not existants:
         return Resultat(
             titre, "INDISPONIBLE",
-            "AUCUN document trouve — le controle ne verifie rien !" + ecartes_resume,
+            "AUCUN document trouve - le controle ne verifie rien !" + ecartes_resume,
             ecartes_detail, bloquant=False, detail_markdown=bool(ecartes_detail),
         )
 

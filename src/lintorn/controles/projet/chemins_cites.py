@@ -149,7 +149,7 @@ def _sortie_de_lintorn(token: str) -> bool:
     contributeur était bloqué par le contrôle censé l'aider. Ils existent par
     définition.
     """
-    sorties = (config.RAPPORT, config.RAPPORT_HTML, config.ETAT)
+    sorties = config.sorties_de_lintorn()
     return (token in {sortie.name for sortie in sorties}
             or any(token == sortie.relative_to(config.RACINE).as_posix()
                    for sortie in sorties if sortie.is_relative_to(config.RACINE)))

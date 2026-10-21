@@ -25,11 +25,12 @@ from __future__ import annotations
 # `config` D'ABORD : c'est lui qui appelle chaque outil pour monter ses commandes.
 # Chargé après, il trouverait un outil à moitié importé, sans ses fonctions.
 from .. import config  # noqa: F401
-from . import django, npm_audit, osv, pip_audit, pytest as pytest_outil, ruff, tsc
+from . import django, npm_audit, osv, pip_audit, pytest as pytest_outil, requirements, ruff, tsc, vulture
 
 # La clé que porte `traduction` dans une commande → la fonction qui lit sa sortie.
 # `config.TRADUCTEURS_CONNUS` en garde la liste (un test veille qu'elles restent d'accord).
 TRADUCTEURS = {"ruff": ruff.traduire, "deploy": django.traduire,
                "npm_audit": npm_audit.traduire, "osv": osv.traduire,
                "pip_audit": pip_audit.traduire, "tsc": tsc.traduire,
-               "pytest": pytest_outil.traduire}
+               "pytest": pytest_outil.traduire, "dependances": requirements.traduire,
+               "vulture": vulture.traduire}

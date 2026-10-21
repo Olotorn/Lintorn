@@ -8,6 +8,8 @@
 - [Pour quel projet ?](#pour-quel-projet-)
 - [Comment l'installer ?](#comment-linstaller-)
 - [Comment s'en servir ?](#comment-sen-servir-)
+- [Conseils d'utilisation](#conseils-dutilisation)
+- [Le hook, sans risque](#le-hook-sans-risque)
 - [Les règles](#les-règles-le-cœur-de-lintorn)
 - [Ajouter ses outils](#ajouter-ses-outils)
 - [Les commandes](#les-commandes)
@@ -17,13 +19,21 @@
 
 Lintorn n'est pas invasif : il ne lance rien dans ton projet sans **ton accord**.
 
-Lintorn n'est pas qu'un linter. Avec ton accord, il installe aussi les outils d'audit utiles à ton projet (`lintorn outils`).
+La fonction première de Lintorn est d'aller vérifier la mémoire de ton LLM, je l'ai créé pour cette raison. D'après mon expérience, la mémoire des LLM est la cause n°1 des erreurs qui se répètent dans le code. Un LLM écrit sa mémoire sur ta machine et lui fait confiance à 100 %. Or cette mémoire a tendance à pourrir, et personne ne le voit, sauf Lintorn !
+Je ne connais aucun outil similaire à Lintorn. Utilise-le, vérifie les mises à jour (`pipx upgrade lintorn` ou `pip install --upgrade lintorn`, puis `lintorn hook`), et dis-moi ce que tu en penses.
+Pour être prévenu à chaque nouvelle version, abonne-toi au [flux RSS de PyPI](https://pypi.org/rss/project/lintorn/releases.xml).
+Tes retours seront les bienvenus et ils me permettront d'avancer sur ce projet. Pour me les donner : un ticket (*issue*) sur [GitLab](https://gitlab.com/DamXs/lintorn/-/issues).
+L'ère du vibe coding est bien là, cet outil sera, je l'espère, une source de tranquillité pour les nouveaux projets.
+
+**Il est pensé pour travailler avec une IA (vibe coding) : c'est avec un LLM qu'il est le plus simple à utiliser.**
+
+Lintorn n'est pas qu'un linter, il vérifie la mémoire de ton LLM. Avec ton accord, il installe aussi les outils d'audit utiles à ton projet (`lintorn outils`).
 
 Il vérifie que la mémoire de ton agent IA dit encore la vérité sur ton code : les fichiers d'instructions à la racine du projet (CLAUDE.md, AGENTS.md, GEMINI.md, CONVENTIONS.md, .cursorrules… et tu peux en ajouter d'autres) et la mémoire que l'IA garde sur ta machine. Il les compare à la doc et au code du projet.
 
 Un hook est à installer : il lance un scan rapide à chaque `git push`, et bloque le push si un contrôle **bloquant** est au rouge.
 
-Il crée deux rapports, `rapport.md` et `rapport.html`. Ce sont les mêmes, mais le HTML est plus agréable à lire que le Markdown.
+Il écrit son rapport en deux versions, `rapport.md` et `rapport.html` : le même contenu, mais le HTML est plus agréable à lire. Le push a le sien, `rapport-push.md` (et `rapport-push.html`) : une commande lancée juste après ne l'écrase pas, et tu peux toujours relire pourquoi ton push a été bloqué.
 
 
 ## À quoi ça sert ?
@@ -58,6 +68,18 @@ Langages testés hors conditions réelles :
 
 ## Comment l'installer ?
 1) `pipx install lintorn` **(pipx est recommandé !)**
+
+   **Pas encore pipx ?**
+   - Windows : `py -m pip install --user pipx`
+   - Linux Ubuntu : `sudo apt install pipx`
+   - Avec Homebrew: `brew install pipx`
+   - Fedora : `sudo dnf install pipx`
+   - puis `pipx ensurepath`, puis ouvre un nouveau terminal.
+
+Plus d'info sur l'installation : https://pipx.pypa.io/stable/installation/
+
+**Et avec pip ?** `pip install lintorn` marche aussi, mais Lintorn n'existe alors que dans l'environnement où tu l'as installé (ton venv, par exemple). Un push lancé d'ailleurs (le bouton Git de VS Code, un terminal sans ce venv) ne le trouve pas, et part sans vérification. Lintorn te le signale, mais pipx évite le problème : il l'installe une seule fois pour tout ton compte, à l'écart des dépendances de tes projets.
+
 2) `lintorn init`
 ▶ [Voir l'animation](#1-installer)
 
@@ -71,12 +93,36 @@ Maintenant, il faut l'activer ! [Comment s'en servir ?](#comment-sen-servir-)
 1) `config.toml` : la configuration. Les contrôles qui lancent ton code, ouvrent ta base de données ou sortent sur internet sont sur `false` : à toi de les activer ou non (▶ [voir l'exemple](#3-activer-un-contrôle)).
 2) Active les contrôles que tu veux en remplaçant `false` par **`true`**. Tu peux aussi ajouter tes propres outils (voir [Ajouter ses outils](#ajouter-ses-outils)).
 3) `regles.toml` : c'est là que tu mets tes règles maison (aide-toi d'un LLM pour gagner du temps). C'est le cœur de Lintorn : c'est ce fichier qui t'empêche de reculer dans ton projet. Va voir [Les règles](#les-règles-le-cœur-de-lintorn) pour plus de détails.
-4) Le hook : active-le avec `lintorn hook`. À chaque `git push`, il lancera `lintorn rapide`.
+4) Le hook : active-le avec `lintorn hook`. À chaque `git push`, il lancera `lintorn rapide`. Ton projet a déjà des hooks ? Lintorn ne les écrase pas, il te dit comment les faire cohabiter (voir [Le hook, sans risque](#le-hook-sans-risque)).
 5) L'accord : lance `lintorn` une fois dans un terminal et réponds `o` à sa question (ou tape `lintorn confiance`). Sans cet accord, le hook ne lance aucun outil, et il te le dit : « Push autorisé SANS vérification complète ».
 
 `lintorn rapide` : lance un scan sans les outils lents (vulture, pip-audit, npm audit, OSV-Scanner). C'est lui que le hook lance à chaque `git push`.
 
 `lintorn` : lance tous les outils. Ça peut prendre un peu de temps, mais il est recommandé de le lancer de temps en temps. Le rapport de `lintorn rapide` t'indique depuis combien de temps le scan complet n'a pas été fait.
+
+## Conseils d'utilisation
+Les bons conseils que j'ai à te donner.
+
+- Utilise une IA (vibe coding).
+- Ton LLM va pouvoir mettre en place toutes les règles et améliorer ce que `lintorn regles` a préparé.
+- `lintorn regles` prépare un brouillon de chaque règle déjà écrite dans les instructions de ton agent, mais cette commande est encore au stade expérimental et peut avoir des défauts. Je l'ai créée uniquement pour les nouveaux utilisateurs, pour te faciliter la tâche et donner des exemples.
+Le LLM saura mieux faire toutes ces règles que nous et en trouvera sûrement plus.
+- **Un LLM est inhumain**, alors on lui donne des tâches inhumaines.
+- Chaque IA (ou presque) a un correcteur de mémoire, mais il n'est pas automatique et tu n'y penses pas forcément : Lintorn est là pour ça ! Il te dit à chaque push que ta mémoire vs code a bougé.
+
+
+## Le hook, sans risque
+Un hook git qui tourne à chaque `git push`, ça peut faire peur. Voilà ce qu'il fait, et ce qu'il ne fait jamais :
+
+- **Il ne modifie jamais ton code.** Il lit, il lance tes contrôles, il te dit ce qu'il trouve.
+- **Il ne bloque pas en douce.** Quand un contrôle bloquant est au rouge, il te demande d'abord : « Pousser quand même ? [o/N] ».
+- **Tu peux toujours passer outre**, une fois : `git push --no-verify`.
+- **Il respecte tes hooks existants** (pre-commit, husky…). S'il en trouve, `lintorn hook` ne les écrase pas : il te donne la ligne à ajouter à ton propre `pre-push`.
+- **Tu peux le retirer à tout moment** : `git config --unset core.hooksPath`.
+
+### **Pourquoi un contrôle au push et non au commit ?**
+Le faire à chaque commit serait l'idéal, mais Lintorn peut être assez lourd. J'ai donc choisi le push : on le fait moins souvent, et c'est là que le risque est le plus grand. Pouvoir choisir entre les deux viendra peut-être dans une prochaine version.
+
 
 ## Les règles, le cœur de Lintorn
 C'est ici que ça devient cool ! Tu y mets tes propres règles pour que Lintorn suive le bon chemin, car aucun outil n'est capable de deviner à ta place ce que tu veux. Je te recommande fortement l'aide d'une IA à ce moment-là : c'est assez long à écrire, et un LLM te le fera en quelques minutes. À toi de vérifier ensuite que ton LLM ne s'est pas trompé. Une fois tes règles en place, plus aucune erreur n'est muette : Lintorn te le dira au prochain `git push` ou au prochain `lintorn`.
@@ -206,12 +252,15 @@ Tape `lintorn` pour la première fois : il te demande ton accord avant de lancer
 #### 9.2 `.lintorn/rapport.html` : à ouvrir dans le navigateur, plus agréable à lire
 ![rapport.html](https://gitlab.com/DamXs/lintorn/-/raw/main/docs/png/rapport-html.png)
 
+#### 9.3 `.lintorn/rapport-push.md` et `.lintorn/rapport-push.html` : ton dernier push
+Les mêmes rapports, écrits seulement par le hook. Ils restent là jusqu'au push suivant, quoi que tu lances entre-temps. La première ligne de chaque rapport dit d'où il vient : « pendant un push » ou « hors push ».
+
 ---
 
 ## C'est la fin !
 J'espère que ce guide est assez clair.
 
-Une question, un bug ? Ouvre un ticket sur [GitLab](https://gitlab.com/DamXs/lintorn/-/issues).
+Une question, un bug ? Ouvre un ticket (*issue*) sur [GitLab](https://gitlab.com/DamXs/lintorn/-/issues).
 
 **Tu ne seras plus jamais pris de court sur ton projet. Lintorn est une aide précieuse, mais attention : il peut avoir des bugs ! Sois attentif.**
 

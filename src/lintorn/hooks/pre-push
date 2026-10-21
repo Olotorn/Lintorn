@@ -1,4 +1,7 @@
-#!/bin/sh
+#!/usr/bin/env sh
+#
+# `env sh` et non `/bin/sh` : l'outil pre-commit lit cette ligne au pied de la
+# lettre, et `/bin/sh` n'existe pas sous Windows. `env` cherche `sh` dans le PATH.
 #
 # Hook PRE-PUSH — Lintorn controle avant d'envoyer quoi que ce soit au depot distant.
 #
@@ -10,7 +13,8 @@
 #
 # CE QU'IL FAIT
 #   1. calcule la liste des fichiers réellement poussés
-#   2. lance Lintorn, avec un focus sur CES fichiers
+#   2. lance Lintorn, avec un focus sur CES fichiers. Il les lit sur le DISQUE :
+#      quand ils y sont autres que dans le push, il le dit
 #   3. si un contrôle bloquant est rouge → demande confirmation
 #
 # INSTALLATION (sur chaque clone, et après chaque mise à jour de Lintorn) :
@@ -33,7 +37,21 @@
 #
 # Le hook vit dans <projet>/.lintorn/hooks/ : deux niveaux au-dessus de lui,
 # c'est le projet. Vrai aussi quand projet et dépôt ne font qu'un.
-cd "$(dirname "$0")/../.." || exit 1
+ICI=$(cd "$(dirname "$0")" && pwd -P) || exit 1
+cd "$ICI/../.." || exit 1
+
+# Dans un worktree, git donne GIT_DIR au hook, sans GIT_WORK_TREE : git prend
+# alors le dossier COURANT pour la racine du dépôt. Depuis un sous-projet, les
+# voisins disparaissaient et Lintorn lisait ses chemins de travers. Quand git
+# retrouve seul le même dépôt d'ici, on l'oublie ; un GIT_DIR qui vise un AUTRE
+# dépôt reste, c'est un choix.
+if [ -n "${GIT_DIR:-}" ]; then
+    AVEC=$(git rev-parse --absolute-git-dir 2>/dev/null)
+    SANS=$(unset GIT_DIR GIT_WORK_TREE; git rev-parse --absolute-git-dir 2>/dev/null)
+    if [ -n "$SANS" ] && [ "$AVEC" = "$SANS" ]; then
+        unset GIT_DIR GIT_WORK_TREE
+    fi
+fi
 
 # Se placer dans le projet NE SUFFIT PAS : sans consigne, Lintorn remonte
 # jusqu'au `.git`, donc jusqu'au sommet du dépôt. On lui nomme la racine à
@@ -61,13 +79,49 @@ elif python -c "import lintorn" >/dev/null 2>&1; then
 elif python3 -c "import lintorn" >/dev/null 2>&1; then
     LINTORN="python3 -m lintorn"
 else
+    # Le contrôle « Hook pre-push » repère ensuite ce push parti sans Lintorn.
     echo ""
-    echo "── Lintorn introuvable — le push passe ──────────────────"
-    echo "   Le hook est branche, mais Lintorn n'est pas installe"
-    echo "   dans cet environnement :   pip install lintorn"
+    echo "── Lintorn introuvable : le push passe SANS verification ──"
+    echo "   Le hook est branche, mais la commande lintorn n'est pas"
+    echo "   trouvee ici : un venv non active, ou un editeur qui n'a"
+    echo "   pas le PATH de ton terminal. Pour qu'il la trouve partout :"
+    echo "       pipx install lintorn      (recommande)"
+    echo "   ou  pip install lintorn       dans l'environnement qui pousse"
     echo ""
     exit 0
 fi
+
+# Appelé par git lui-même, ou par le hook d'un autre outil (husky, lefthook,
+# un pre-push écrit à la main) ? Dans le second cas, c'est LUI qui annule le
+# push, s'il transmet notre refus : sans `|| exit 1` sur sa ligne, son script
+# continue et le push part. Annoncer « PUSH ANNULE » serait alors un mensonge.
+DIRECT=0
+HOOKS_DE_GIT=$(git rev-parse --git-path hooks 2>/dev/null)
+if [ -n "$HOOKS_DE_GIT" ] && [ "$(cd "$HOOKS_DE_GIT" 2>/dev/null && pwd -P)" = "$ICI" ]; then
+    DIRECT=1
+fi
+# Lancé par le hook Lintorn d'un autre sous-projet (voir `fin`) : lui transmet
+# notre refus à git, comme git lui-même.
+if [ -n "${LINTORN_VOISIN:-}" ]; then
+    DIRECT=1
+fi
+
+# Un terminal pour poser la question, s'il le faut ? Testé AVANT Lintorn : un
+# refus sans terminal est sans recours, il le note, et son contrôle « Hook
+# pre-push » dira ensuite si ce push est parti malgré tout.
+#
+# On ESSAIE de l'ouvrir, en lecture ET en écriture (la question s'y écrit),
+# plutôt que de tester son existence : dans un script automatisé, le fichier
+# /dev/tty existe mais ne s'ouvre pas. Le test se fait dans un SOUS-SHELL :
+# une redirection qui échoue affiche son erreur au moment où elle est
+# appliquée, donc un `2>/dev/null` posé après arriverait trop tard. En
+# enfermant le tout dans un sous-shell, le 2>/dev/null couvre bien l'ensemble.
+if ( : < /dev/tty > /dev/tty ) 2>/dev/null; then
+    LINTORN_TERMINAL=1
+else
+    LINTORN_TERMINAL=0
+fi
+export LINTORN_TERMINAL
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. QUELS FICHIERS PARTENT DANS CE PUSH ?
@@ -76,75 +130,86 @@ fi
 #   <ref locale> <sha local> <ref distante> <sha distant>
 # Le sha distant vaut 000...0 quand la branche n'existe pas encore là-bas.
 FICHIERS=""
+POUSSES=""
 ZERO="0000000000000000000000000000000000000000"
+# Ce que Lintorn saura de ce qui part : `complete`, `echec` (git n'a pas su
+# tout lister) ou `rien` (l'outil qui l'appelle ne lui a rien transmis). Il
+# ne conclut « OK » que sur une liste complète.
+LISTE=complete
+LIGNES=""
 
-# Le remote visé : git le passe en premier argument au hook.
+# Le remote visé : git le passe en premier argument au hook, son adresse en second.
 REMOTE="${1:-origin}"
+ADRESSE="${2:-}"
+LINTORN_DISTANT="$REMOTE"
+export LINTORN_DISTANT
 
-# LA BRANCHE PAR DÉFAUT DU REMOTE, pour comparer une branche neuve.
-#
-# ⚠️ Jamais un nom écrit en dur : `origin/main` n'existe pas sur un dépôt en
-# `master` ou en `development`. `merge-base` échouait, aucun fichier n'était
-# listé, et la ligne « Defauts dans les fichiers pousses » disparaissait du
-# rapport sans un mot.
-#
-# `refs/remotes/<remote>/HEAD` n'est posé que par `git clone` : un dépôt créé
-# sur place puis poussé ne l'a pas. On essaie alors `main` puis `master`, et
-# on le DIT — une comparaison faite sur un nom supposé doit se savoir.
-DEFAUT=""
-AVIS_DEFAUT=""
-REF_DEFAUT=$(git symbolic-ref -q "refs/remotes/$REMOTE/HEAD" 2>/dev/null)
-if [ -n "$REF_DEFAUT" ]; then
-    DEFAUT="${REF_DEFAUT#refs/remotes/}"
-else
-    for nom in main master; do
-        if git rev-parse -q --verify "refs/remotes/$REMOTE/$nom" >/dev/null 2>&1; then
-            DEFAUT="$REMOTE/$nom"
-            break
-        fi
-    done
-    CORRIGER="pour la fixer : git remote set-head $REMOTE --auto"
-    if [ -n "$DEFAUT" ]; then
-        AVIS_DEFAUT="Branche par defaut de $REMOTE inconnue : branche neuve comparee a $DEFAUT, suppose ($CORRIGER)."
-    else
-        AVIS_DEFAUT="Branche par defaut de $REMOTE inconnue : les fichiers d'une branche neuve ne peuvent pas etre listes, le focus est saute ($CORRIGER)."
-    fi
-fi
-AVIS=""
-
-while read -r _local_ref local_sha _remote_ref remote_sha; do
-    [ -z "$local_sha" ] && continue
-    if [ "$remote_sha" = "$ZERO" ]; then
-        # Branche neuve : on compare à la branche par défaut plutôt qu'à rien,
-        # sinon on listerait l'histoire entière du dépôt.
-        BASE=""
-        [ -n "$AVIS_DEFAUT" ] && AVIS="$AVIS_DEFAUT"
-        if [ -n "$DEFAUT" ]; then
-            BASE=$(git merge-base "$local_sha" "$DEFAUT" 2>/dev/null || echo "")
-            if [ -z "$BASE" ]; then
-                AVIS="Aucun ancetre commun avec $DEFAUT : les fichiers de la branche neuve ne peuvent pas etre listes, le focus est saute."
-            fi
-        fi
-    else
-        BASE="$remote_sha"
-    fi
-    if [ -n "$BASE" ]; then
-        # `--relative` et `-- .` : les chemins sortent relatifs au projet, et
-        # ceux des autres sous-projets d'un monorepo ne s'y mêlent pas.
-        #
-        # `core.quotePath=false` : sans lui, git rend un nom accentué sous la
-        # forme "src/fichier_\303\251xotique.py" — un nom qui ne désigne aucun
-        # fichier. Le focus ne le trouvait pas et annonçait « aucun defaut
-        # dedans » sur un fichier fautif.
+# Les fichiers qu'envoie une ligne : $1 le commit qui part, $2 ce que le
+# distant a déjà ($ZERO s'il n'a rien).
+lister() {
+    [ "$1" = "$ZERO" ] && return 0          # une suppression : rien ne part
+    # Les commits que ce push envoie : Lintorn les note, et son contrôle « Hook
+    # pre-push » vérifie ensuite que le dernier push en faisait bien partie.
+    POUSSES="$POUSSES $1"
+    # `--relative` et `-- .` : les chemins sortent relatifs au projet, et
+    # ceux des autres sous-projets d'un monorepo ne s'y mêlent pas.
+    #
+    # `core.quotePath=false` : sans lui, git rend un nom accentué sous la
+    # forme "src/fichier_\303\251xotique.py" — un nom qui ne désigne aucun
+    # fichier. Le focus ne le trouvait pas et annonçait « aucun defaut
+    # dedans » sur un fichier fautif.
+    if [ "$2" != "$ZERO" ] && git cat-file -e "$2^{commit}" 2>/dev/null; then
         NOUVEAUX=$(git -c core.quotePath=false diff --name-only --relative \
-                       "$BASE" "$local_sha" -- . 2>/dev/null)
-        # Séparés par des SAUTS DE LIGNE, jamais par des espaces : un espace
-        # dans un nom de fichier le coupait en deux, et aucune des deux
-        # moitiés ne désignait quoi que ce soit.
-        FICHIERS="$FICHIERS
-$NOUVEAUX"
+                       "$2" "$1" -- . 2>/dev/null) || LISTE=echec
+    else
+        # Branche neuve, premier push, ou distant réécrit par un commit qu'on
+        # n'a pas : les commits que le distant n'a pas encore, d'après ce
+        # qu'on sait de lui. ⚠️ Comparer à sa branche par défaut ne listait
+        # rien quand elle était inconnue (un dépôt en `develop`, un premier
+        # push, une branche orpheline) : rien n'était comparé, et le hook
+        # concluait « Lintorn OK ». `--cc` : d'une fusion, ce qu'elle a
+        # résolu, pas ce que la branche fusionnée avait déjà poussé.
+        NOUVEAUX=$(git -c core.quotePath=false log --format= --name-only --cc --relative \
+                       "$1" --not --remotes="$REMOTE" -- . 2>/dev/null) || LISTE=echec
     fi
-done
+    # Séparés par des SAUTS DE LIGNE, jamais par des espaces : un espace
+    # dans un nom de fichier le coupait en deux, et aucune des deux
+    # moitiés ne désignait quoi que ce soit.
+    FICHIERS="$FICHIERS
+$NOUVEAUX"
+}
+
+# pre-commit lit lui-même l'entrée standard de git, et ne la transmet pas : il
+# donne la première branche poussée dans ses variables. Sans elles, Lintorn
+# ne savait rien de ce qui part, et concluait « OK » sur un disque différent.
+if [ "$DIRECT" = 0 ] && [ -n "${PRE_COMMIT_LOCAL_BRANCH:-}${PRE_COMMIT_TO_REF:-}" ]; then
+    LIGNES=1
+    SHA_LOCAL="${PRE_COMMIT_TO_REF:-}"
+    [ -z "$SHA_LOCAL" ] && SHA_LOCAL=$(git rev-parse -q --verify "$PRE_COMMIT_LOCAL_BRANCH" 2>/dev/null)
+    if [ -n "$SHA_LOCAL" ]; then
+        lister "$SHA_LOCAL" "${PRE_COMMIT_FROM_REF:-$ZERO}"
+    else
+        LISTE=rien
+    fi
+else
+    # Gardée : les hooks Lintorn des autres sous-projets la reçoivent aussi.
+    ENTREE=$(cat)
+    while read -r _local_ref local_sha _remote_ref remote_sha; do
+        [ -z "$local_sha" ] && continue
+        LIGNES=1
+        lister "$local_sha" "$remote_sha"
+    done <<FIN_ENTREE
+$ENTREE
+FIN_ENTREE
+fi
+
+# Rien reçu. Appelé par git, c'est qu'il n'y a rien à pousser. Appelé par un
+# autre outil, ce peut être lui qui garde la liste : si la branche courante a
+# des commits que le distant n'a pas, Lintorn ne sait pas ce qui part.
+if [ -z "$LIGNES" ] && [ "$DIRECT" = 0 ] \
+        && [ -n "$(git rev-list -n 1 HEAD --not --remotes="$REMOTE" 2>/dev/null)" ]; then
+    LISTE=rien
+fi
 
 # Un nom par ligne → les arguments positionnels, qui savent porter un nom
 # contenant une espace. (`sh` n'a pas de tableaux ; c'est la façon POSIX.)
@@ -157,10 +222,69 @@ set -- $FICHIERS
 set +f
 IFS=$ANCIEN_IFS
 
+LINTORN_POUSSE="$POUSSES"
+LINTORN_LISTE="$LISTE"
+export LINTORN_POUSSE LINTORN_LISTE
+
+# Dans un monorepo, quel sous-projet parle : chacun a son Lintorn.
+SOMMET=$(cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null && pwd -P)
+SOUS_PROJET=""
+if [ -n "$SOMMET" ] && [ "$SOMMET" != "$(pwd -P)" ]; then
+    SOUS_PROJET=" : ${PWD#"$SOMMET"/}/"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LES AUTRES SOUS-PROJETS LINTORN DU DÉPÔT
+# ─────────────────────────────────────────────────────────────────────────────
+# git ne lance qu'UN hook : celui qui est branché lance aussi ceux que
+# `lintorn hook` a posés dans les autres sous-projets, avec la même liste de ce
+# qui part. Une ligne ajoutée à la main dans cette copie disparaissait au
+# `lintorn hook` suivant, et l'autre sous-projet poussait sans contrôle
+# derrière un « Lintorn OK ». Un sous-projet se reconnaît à son `.lintorn/`,
+# versionné ou en passe de l'être.
+voisins() {
+    [ -n "$SOMMET" ] || return 0
+    git -C "$SOMMET" -c core.quotePath=false ls-files -co --exclude-standard -- \
+            ':(glob)**/.lintorn/config.toml' ':(glob)**/.lintorn/regles.toml' \
+            ':(glob)**/.lintorn/.gitignore' 2>/dev/null \
+        | sed 's#\.lintorn/[^/]*$##' | sort -u \
+        | while IFS= read -r dossier; do
+            copie="$SOMMET/${dossier}.lintorn/hooks/pre-push"
+            [ -f "$copie" ] || continue
+            [ "$(cd "$SOMMET/${dossier}.lintorn/hooks" && pwd -P)" = "$ICI" ] && continue
+            printf '%s\n' "$copie"
+        done
+}
+
+# Ce sous-projet laisse partir le push : au tour des autres. Le premier refus
+# l'annule.
+fin() {
+    if [ "$DIRECT" = 1 ] && [ -z "${LINTORN_VOISIN:-}" ]; then
+        COPIES=$(voisins)
+        if [ -n "$COPIES" ]; then
+            while IFS= read -r copie; do
+                printf '%s\n' "$ENTREE" | LINTORN_VOISIN=1 sh "$copie" "$REMOTE" "$ADRESSE" || exit 1
+            done <<FIN_COPIES
+$COPIES
+FIN_COPIES
+        fi
+    fi
+    exit 0
+}
+
 echo ""
-echo "── Lintorn controle avant push ─────────────────────────────"
-if [ -n "$AVIS" ]; then
-    echo "   $AVIS"
+echo "── Lintorn controle avant push$SOUS_PROJET ─────────────────────────────"
+
+# La version qui a posé ce hook, et celle qu'il lance. Le venv d'un autre
+# projet, activé dans ce terminal, faisait tourner sa propre version de
+# Lintorn, sans un mot.
+POSE_PAR=$(cat "$ICI/version" 2>/dev/null)
+# shellcheck disable=SC2086
+TOURNE=$($LINTORN version 2>/dev/null)
+if [ -n "$POSE_PAR" ] && [ -n "$TOURNE" ] && [ "$POSE_PAR" != "$TOURNE" ]; then
+    echo "   ATTENTION : ce hook a ete pose par $POSE_PAR, mais c'est $TOURNE"
+    echo "   qui tourne ($(command -v lintorn 2>/dev/null || echo "$LINTORN"))."
+    echo "   Un autre venv est-il actif ? Sinon, relance : lintorn hook"
 fi
 
 # --rapide : on saute pip-audit et vulture (lents, et non bloquants de toute
@@ -185,47 +309,58 @@ CODE=$?
 if [ $CODE -eq 0 ]; then
     echo "── Lintorn OK, push autorise ─────────────────────────────"
     echo ""
-    exit 0
+    fin
 fi
 
-# 3 : rien ne bloque, mais des outils n'ont RIEN verifie. Le push passe — ce
-# n'est pas un rouge — mais la derniere ligne ne doit pas dire « OK ».
+# 3 : rien ne bloque, mais une partie de ce push n'a PAS ete verifiee (un
+# outil muet, une config illisible, un push dont rien ne lit aucun fichier, un
+# disque qui n'est pas ce qui part). Le push passe, ce n'est pas un rouge, mais la
+# derniere ligne ne doit pas dire « OK ».
 if [ $CODE -eq 3 ]; then
     echo "── Push autorise SANS verification complete ──────────────"
-    echo "   Des outils n'ont rien verifie (liste juste au-dessus)."
-    echo "   Le plus souvent : lancer une fois  lintorn confiance  dans un terminal."
+    echo "   Ce qui n'a pas ete verifie est dit juste au-dessus."
     echo ""
-    exit 0
+    fin
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. ÇA COINCE — on demande, on n'impose pas
 # ─────────────────────────────────────────────────────────────────────────────
-echo ""
-echo "╔════════════════════════════════════════════════════════╗"
-echo "║  Des controles BLOQUANTS sont en alerte                ║"
-echo "╚════════════════════════════════════════════════════════╝"
-echo ""
-echo "  Detail complet : .lintorn/rapport.md"
-echo ""
+cadre() {
+    echo ""
+    echo "╔════════════════════════════════════════════════════════╗"
+    echo "║  Des controles BLOQUANTS sont en alerte                ║"
+    echo "╚════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "  Detail complet : .lintorn/rapport-push.md"
+    echo ""
+}
 
 # git a déjà consommé l'entrée standard (la liste des refs) : pour poser une
-# question, il faut lire directement le terminal via /dev/tty.
-#
-# On ESSAIE de l'ouvrir plutôt que de tester son existence : dans un script
-# automatisé, le fichier /dev/tty existe mais ne s'ouvre pas.
-#
-# Le test se fait dans un SOUS-SHELL `( : < /dev/tty )` : une redirection qui
-# échoue affiche son erreur au moment où elle est appliquée, donc un
-# `2>/dev/null` posé après arriverait trop tard. En enfermant le tout dans un
-# sous-shell, le 2>/dev/null couvre bien l'ensemble.
-if ! ( : < /dev/tty ) 2>/dev/null; then
+# question, il faut lire directement le terminal via /dev/tty (testé plus haut).
+if [ "$LINTORN_TERMINAL" = 0 ]; then
+    cadre
     echo "  ────────────────────────────────────────────────────"
-    echo "  PUSH ANNULE : pas de terminal pour repondre."
+    if [ "$DIRECT" = 1 ]; then
+        echo "  PUSH ANNULE : pas de terminal pour repondre."
+    else
+        echo "  LINTORN REFUSE CE PUSH : pas de terminal pour repondre."
+        echo "  ATTENTION : c'est ton hook qui appelle Lintorn. Le push"
+        echo "  n'est annule que s'il transmet ce refus : la ligne qui"
+        echo "  appelle Lintorn doit finir par  || exit 1"
+    fi
     echo ""
     echo "  Tu pousses probablement depuis le bouton de VS Code."
     echo "  VS Code lance git SANS terminal : impossible de poser"
     echo "  la question, donc on annule par securite."
+    if [ "$DIRECT" = 0 ]; then
+        # Sous Windows, pre-commit lance le hook sans lui laisser le terminal :
+        # pousser depuis un terminal n'y change rien.
+        echo ""
+        echo "  Ou ton outil de hooks ne laisse pas Lintorn acceder au"
+        echo "  terminal (pre-commit sous Windows, par exemple) : seul"
+        echo "  git push --no-verify passe alors outre."
+    fi
     echo ""
     echo "  POUR VOIR CE MESSAGE DANS VS CODE :"
     echo "     Affichage > Sortie (Ctrl+Shift+U) > liste 'Git'"
@@ -240,18 +375,30 @@ if ! ( : < /dev/tty ) 2>/dev/null; then
     exit 1
 fi
 
-printf "  Pousser quand meme ? [o/N] "
+# La question, et ce qui l'entoure, s'écrivent sur le TERMINAL : pre-commit
+# et lefthook gardent la sortie du hook jusqu'à ce qu'il finisse. Le push
+# attendait une réponse à une question que personne ne voyait.
+{
+    cadre
+    printf "  Pousser quand meme ? [o/N] "
+} > /dev/tty
 read -r REPONSE < /dev/tty
 
 case "$REPONSE" in
     o|O|y|Y|oui|OUI)
-        echo "  -> Push force par l'utilisateur."
-        echo ""
-        exit 0
+        { echo "  -> Push force par l'utilisateur."; echo ""; } > /dev/tty
+        fin
         ;;
     *)
-        echo "  -> Push ANNULE."
-        echo ""
+        if [ "$DIRECT" = 1 ]; then
+            { echo "  -> Push ANNULE."; echo ""; } > /dev/tty
+        else
+            {
+                echo "  -> Lintorn REFUSE ce push. Il n'est annule que si ton hook"
+                echo "     transmet ce refus (ligne qui finit par  || exit 1)."
+                echo ""
+            } > /dev/tty
+        fi
         exit 1
         ;;
 esac

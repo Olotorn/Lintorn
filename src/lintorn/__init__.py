@@ -1,3 +1,3 @@
 """Lintorn — audite le code d'un projet ET la mémoire que lit l'assistant IA."""
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

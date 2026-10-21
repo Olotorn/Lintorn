@@ -48,14 +48,8 @@ def _config_doc_ia(tmp_path, monkeypatch, texte, regles=()):
     # dépôt : dans ce CLAUDE.md fabriqué, elles seraient « sans objet ».
     monkeypatch.setattr(config, "HORS_PORTEE", [])
     return doc
-def _hors_cp1252(texte: str) -> list[str]:
-    mauvais = []
-    for caractere in texte:
-        try:
-            caractere.encode("cp1252")
-        except UnicodeEncodeError:
-            mauvais.append(caractere)
-    return sorted(set(mauvais))
+def _hors_ascii(texte: str) -> list[str]:
+    return sorted({c for c in texte if not c.isascii()})
 def _sortie_npm(sortie):
     """Ce que `lancer()` rend quand npm sort en 1 : une ALERTE, par défaut."""
     return Resultat("Failles connues JS (npm audit)", "ALERTE", "1 ligne(s) de sortie",

@@ -387,6 +387,27 @@ def _arreter(proc: subprocess.Popen) -> None:
     proc.wait()
 
 
+# Les variables par lesquelles git désigne SON dépôt (git(1), « The Git Repository »),
+# et les réglages d'un `git -c ... push` (GIT_CONFIG_PARAMETERS).
+# Dans un worktree, git exporte GIT_DIR vers le hook : un outil lancé par Lintorn
+# qui fait `git init` puis `git commit` dans un dossier temporaire (les tests d'un
+# projet) écrivait dans le dépôt de l'utilisateur, et `git init --bare` le
+# déclarait nu. Un outil trouve son dépôt depuis son dossier, comme partout ailleurs.
+VARIABLES_DU_DEPOT = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                      "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                      "GIT_NAMESPACE", "GIT_PREFIX", "GIT_QUARANTINE_PATH",
+                      "GIT_CONFIG_PARAMETERS")
+
+
+def environnement_d_un_outil() -> dict[str, str]:
+    """L'environnement d'un outil lancé par Lintorn : celui de Lintorn, sans le dépôt du hook."""
+    env = {nom: valeur for nom, valeur in os.environ.items() if nom not in VARIABLES_DU_DEPOT}
+    # Un outil de Lintorn ne laisse rien dans le projet audité : pas de
+    # `__pycache__` à côté des fichiers que pytest ou vulture importent.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
 def _executer(commande: list[str], cwd: Path) -> tuple[int, str, str]:
     """(code, sortie standard, sortie d'erreur). Lève ce que `subprocess` lève.
 
@@ -400,9 +421,7 @@ def _executer(commande: list[str], cwd: Path) -> tuple[int, str, str]:
     with tempfile.TemporaryFile() as sortie, tempfile.TemporaryFile() as erreur:
         proc = subprocess.Popen(
             commande, cwd=cwd, stdin=subprocess.DEVNULL, stdout=sortie, stderr=erreur,
-            # Un outil de Lintorn ne laisse rien dans le projet audité : pas de
-            # `__pycache__` à côté des fichiers que pytest ou vulture importent.
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            env=environnement_d_un_outil(),
             start_new_session=hasattr(os, "killpg"),
         )
         try:
@@ -549,7 +568,7 @@ def lancer(
     # il donne l'illusion d'être couvert.
     return Resultat(
         titre, "ERREUR",
-        f"l'outil a plante (code {code}) — plus aucune analyse",
+        f"l'outil a plante (code {code}) - plus aucune analyse",
         sortie, bloquant, code_sortie=code,
     )
 

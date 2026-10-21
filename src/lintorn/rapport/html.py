@@ -271,7 +271,8 @@ def _ce_que_fait_le_push(resultats: list[Resultat]) -> str:
             f"n'est pas actif ({_texte(hook.resume)}).")
 
 
-def page(resultats: list[Resultat], moment: datetime | None = None) -> str:
+def page(resultats: list[Resultat], moment: datetime | None = None,
+         hook: bool = False) -> str:
     """La page complète, autonome : ni police ni feuille de style à charger.
 
     `moment` : celui du rapport Markdown écrit dans le même passage. Deux
@@ -298,7 +299,8 @@ def page(resultats: list[Resultat], moment: datetime | None = None) -> str:
         resume=resume,
         verdict=verdict,
         fiches="\n".join(_fiche(resultat) for resultat in resultats),
-        markdown=html.escape(config.RAPPORT.name),
+        markdown=html.escape(config.rapport_du(hook).name),
+        quand="pendant un push" if hook else "hors push",
     )
 
 
@@ -404,7 +406,8 @@ _MODELE = """<!DOCTYPE html>
 <div class="page">
 <header>
   <h1>Lintorn — {projet}</h1>
-  <p>Généré le {horodatage} par lintorn {version}. Page régénérée à chaque exécution : ne rien y écrire à la main.</p>
+  <p>Généré le {horodatage} par lintorn {version}, {quand}.
+  Page régénérée à chaque exécution : ne rien y écrire à la main.</p>
   <p class="compteurs">{resume}</p>
 </header>
 {verdict}

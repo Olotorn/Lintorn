@@ -76,7 +76,7 @@ def refus_sans_lancer(entree: dict, rapide: bool) -> Resultat | None:
         # (failles de sécurité) — on préfère une ligne explicite.
         return Resultat(
             entree["titre"], "INDISPONIBLE",
-            "NON EXECUTE (mode --rapide) — relancer sans --rapide",
+            "NON EXECUTE (mode --rapide) - relancer sans --rapide",
             bloquant=False,
         )
     if _sans_le_python_du_projet(entree):

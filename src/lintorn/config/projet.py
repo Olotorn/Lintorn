@@ -93,6 +93,33 @@ def git(*arguments: str, cwd: Path | None = None, timeout: float = 10,
     )
 
 
+def _sans_le_depot_du_hook() -> None:
+    """Oublie GIT_DIR quand git retrouve seul le même dépôt depuis le projet.
+
+    Dans un worktree, git donne GIT_DIR au hook, sans GIT_WORK_TREE : git prend
+    alors le dossier COURANT pour la racine du dépôt. Lancé depuis un sous-projet
+    de monorepo, Lintorn lisait tous ses chemins de travers (hook « NON BRANCHE »,
+    fichiers « pas sur ton disque »). Le hook l'oublie déjà ; Lintorn le refait
+    pour qui l'appelle sans lui (pre-commit, un script). Un GIT_DIR qui vise un
+    AUTRE dépôt reste : c'est un choix de l'utilisateur.
+    """
+    if not os.environ.get("GIT_DIR"):
+        return
+
+    def depot() -> str | None:
+        try:
+            sortie = config.git("rev-parse", "--absolute-git-dir")
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return os.path.realpath(sortie.stdout.strip()) if sortie.returncode == 0 else None
+
+    avec = depot()
+    gardees = {nom: os.environ.pop(nom) for nom in ("GIT_DIR", "GIT_WORK_TREE") if nom in os.environ}
+    sans = depot()
+    if sans is None or sans != avec:
+        os.environ.update(gardees)
+
+
 def _sous_git() -> bool | None:
     """Le projet audité est-il dans un dépôt git ?
 
@@ -149,7 +176,15 @@ def _fichiers_du_projet() -> list[Path]:
     for dossier, sous_dossiers, fichiers in os.walk(config.RACINE):
         sous_dossiers[:] = [nom for nom in sous_dossiers if nom not in config.IGNORES]
         trouves += [Path(dossier) / nom for nom in fichiers]
+        if len(trouves) >= config.LIMITE_HORS_GIT:
+            return trouves[:config.LIMITE_HORS_GIT]
     return trouves
+
+
+# Hors dépôt, au-delà, le dossier n'est sans doute pas un projet : lancé depuis
+# le dossier personnel, le parcours durait près de deux minutes et prenait
+# 900 Mo, avant même la première ligne. Dans un dépôt, git liste sans limite.
+LIMITE_HORS_GIT = 50_000
 
 
 def suivi_par_git(chemin: Path) -> bool:

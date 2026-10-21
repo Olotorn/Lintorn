@@ -3,7 +3,12 @@
 
 from __future__ import annotations
 
-from .. import config
+import re
+
+from .. import base, config
+
+# Une trouvaille de vulture : `app/vues.py:12: unused function 'x' (60% confidence)`.
+_CANDIDAT = re.compile(r"^.+:\d+: unused ", re.M)
 
 
 # `BACKEND or PY_RACINE` : sur un projet Django, le dossier du `manage.py` ;
@@ -24,7 +29,15 @@ def commande() -> dict:
                 "--ignore-names", ",".join(config.VULTURE_IGNORES)],
         "cwd": config.BACKEND or config.PY_RACINE,
         "bloquant": False,
-        "traduction": None,
+        "traduction": "vulture",
         "lent": True,
         "codes_alerte": (3,),   # vulture : 3 = du code mort a été trouvé
     }
+
+
+def traduire(resultat: base.Resultat) -> base.Resultat:
+    """Combien de candidats : « 2 ligne(s) de sortie » ne disait pas ce que vulture avait trouvé."""
+    candidats = len(_CANDIDAT.findall(resultat.detail))
+    if candidats:
+        resultat.resume = f"{candidats} candidat(s) de code mort - a confirmer a l'oeil"
+    return resultat

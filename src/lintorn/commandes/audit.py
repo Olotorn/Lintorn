@@ -6,9 +6,11 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from .. import base, config, noyau
 from ..base import Resultat
+from ..controles.outillage import audit_complet, hook_git
 from ..controles.projet import doc_vs_code
 from ..rapport import attente, console, focus, markdown
 from . import aide
@@ -31,7 +33,32 @@ def _fichiers_de_l_entree() -> list[str]:
     except (AttributeError, OSError, ValueError):
         return []
     texte = brut.decode(sys.getfilesystemencoding(), errors="replace")
-    return [ligne.rstrip("\r") for ligne in texte.split("\n") if ligne.rstrip("\r")]
+    # Une fois chacun : deux branches, ou deux commits d'une branche neuve,
+    # touchent souvent le même fichier.
+    return list(dict.fromkeys(ligne.rstrip("\r") for ligne in texte.split("\n")
+                              if ligne.rstrip("\r")))
+
+
+def _depuis_la_racine(fichiers: list[str]) -> list[str]:
+    """Les noms tapés depuis un sous-dossier, dits depuis la racine du projet.
+
+    Le focus les cherchait depuis la racine : `lintorn --fichiers f.js` lancé
+    dans `sous/` disait « aucun defaut connu » d'un `sous/f.js` fautif.
+    """
+    try:
+        ici = Path.cwd().resolve()
+        racine = config.RACINE.resolve()
+    except OSError:
+        return fichiers
+    noms = []
+    for fichier in fichiers:
+        chemin = Path(fichier)
+        try:
+            noms.append((chemin if chemin.is_absolute() else ici / chemin)
+                        .resolve().relative_to(racine).as_posix())
+        except (ValueError, OSError):
+            noms.append(fichier)
+    return noms
 
 
 def _audit_complet_fait(resultats: list[Resultat]) -> bool:
@@ -57,9 +84,27 @@ def lancer(args: list[str], apres_separateur: list[str]) -> int:
     fichiers: list[str] = []
     if "--fichiers" in args:
         fichiers = [a for a in args[args.index("--fichiers") + 1:] if not a.startswith("--")]
-        fichiers += apres_separateur
+        fichiers = _depuis_la_racine(fichiers + apres_separateur)
     if "--fichiers-stdin" in args:
         fichiers += _fichiers_de_l_entree()
+
+    hook = os.environ.get("LINTORN_HOOK") == "1"
+    if hook:
+        # La seule preuve que le pre-push d'un autre outil lance vraiment
+        # Lintorn : lire son texte prenait un commentaire pour un appel.
+        hook_git.noter_passage()
+    if (hook and not fichiers and os.environ.get("LINTORN_LISTE") == "complete"
+            and "LINTORN_POUSSE" in os.environ):
+        # Le hook a dit tout ce qui part, et rien de nouveau ne part : rien à
+        # juger. Une faute du disque refusait la suppression d'une branche, et
+        # « Lintorn OK » tombait sur zéro fichier lu.
+        # Sa propre conclusion : celle d'un audit dirait « AUCUN controle n'a pu
+        # tourner », vrai, mais là où il n'y avait rien à contrôler.
+        rien = focus.rien_ne_part()
+        markdown.ecrire_rapport([rien], hook=True)
+        print(f"\n{rien.resume[0].upper()}{rien.resume[1:]}.")
+        hook_git.noter_verdict(0)
+        return 0
 
     with attente.Attente() as ligne:
         if "--doc" in args:
@@ -74,12 +119,22 @@ def lancer(args: list[str], apres_separateur: list[str]) -> int:
                 # interrompu ne doit pas compter comme fait.
                 base.ecrire_etat("dernier_audit_complet",
                                   datetime.now().isoformat(timespec="seconds"))
+                # Sa ligne a été jugée AVANT : elle disait « jamais lance » sous
+                # l'audit complet qui venait de tourner.
+                a_jour = audit_complet.controle_audit_complet()
+                resultats = [a_jour if r.titre == a_jour.titre else r for r in resultats]
 
         if fichiers:
             resultats.append(focus.focus_sur(resultats, fichiers))
+        if hook:
+            resultats += focus.ecart_avec_le_disque(
+                fichiers, os.environ.get("LINTORN_POUSSE", "").split(),
+                os.environ.get("LINTORN_LISTE"), os.environ.get("LINTORN_DISTANT"))
 
         ligne.etape("ecriture du rapport")
-        rapport_ecrit = markdown.ecrire_rapport(resultats)
+        rapport_ecrit = markdown.ecrire_rapport(resultats, hook=hook)
 
-    return console.afficher(resultats, rapport_ecrit, manque_config,
-                            hook=os.environ.get("LINTORN_HOOK") == "1")
+    code = console.afficher(resultats, rapport_ecrit, manque_config, hook=hook)
+    if hook:
+        hook_git.noter_verdict(code)
+    return code

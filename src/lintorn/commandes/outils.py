@@ -233,26 +233,11 @@ def _installer_pip(a_installer: list[dict], sans_demander: bool) -> bool:
     for outil in a_installer:
         print(f"    {outil['pip']:<12} {outil['role']}")
 
-    # L'effet de bord se dit AVANT, pas après : ces paquets apparaîtront dans
-    # `pip freeze`, donc le contrôle « Dependances vs venv » les signalera
-    # aussitôt comme « installes mais pas declares ».
-    # ⚠️ Un avertissement qui ne dit pas COMMENT le suivre ne sert à rien : on
-    # donne les deux chemins exacts, pas un conseil en l'air.
-    print("\nA SAVOIR : ces paquets apparaitront ensuite comme 'non declares'")
-    print("dans le controle Dependances vs venv. Deux facons de regler ca :")
-    print()
-    requirements = config.REQUIREMENTS
-    if requirements is not None:
-        print(f"  1. les declarer  -> ajouter ces lignes dans {chemins.relatif(requirements)} :")
-        for outil in a_installer:
-            print(f"                          {outil['pip']}")
-    else:
-        print("  1. les declarer  -> aucun requirements.txt trouve ; si tu en")
-        print("                      crees un, ajoute-les dedans")
-    print()
-    print("  2. ou couper le controle -> dans .lintorn/config.toml :")
-    print("                          [controles]")
-    print("                          dependances = false")
+    # Le contrôle « Dependances vs venv » ne les compte pas, ni ce qu'ils
+    # tirent : il les nomme à part. Comptés, ils faisaient refuser le premier
+    # push de qui venait de suivre le README.
+    print("\nCe sont des outils d'audit : le controle Dependances vs venv ne les")
+    print("compte pas dans tes dependances (il les nomme a part dans le rapport).")
 
     if not sans_demander and not _oui("\nInstaller maintenant ? [o/N] "):
         print("Rien n'a ete installe.")

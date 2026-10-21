@@ -1,6 +1,14 @@
 # Lintorn
 """Une commande de Lintorn = un fichier. Le sommaire qui les aiguille : `cli.py`."""
 
-from . import aide, audit, dossier_lintorn, hook, init, outils, regles, securite
+from importlib import import_module
 
-__all__ = ["aide", "audit", "dossier_lintorn", "hook", "init", "outils", "regles", "securite"]
+__all__ = ["aide", "audit", "confiance", "dossier_lintorn", "hook", "init", "outils", "regles",
+           "securite"]
+
+
+def __getattr__(nom: str):
+    """Chaque commande n'est importée qu'au moment où l'on s'en sert (pourquoi : `cli.py`)."""
+    if nom in __all__:
+        return import_module(f".{nom}", __name__)
+    raise AttributeError(f"module {__name__!r} has no attribute {nom!r}")

@@ -27,7 +27,7 @@ from .. import config
 # charge AVANT les outils, qui le lisent. Un test verifie que
 # les deux listes restent d'accord.
 TRADUCTEURS_CONNUS = ("ruff", "deploy", "npm_audit", "osv", "pip_audit", "tsc",
-                      "pytest")
+                      "pytest", "dependances", "vulture")
 
 
 _CLES_COMMANDE = {"cle", "titre", "cmd", "cwd", "bloquant", "traduction",

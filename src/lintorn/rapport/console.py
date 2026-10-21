@@ -6,6 +6,8 @@ from __future__ import annotations
 from .. import __version__, chemins, config
 from ..base import MARQUEUR, Resultat
 from ..controles import outillage
+from ..controles.outillage import configuration
+from . import focus
 
 
 def signaler_non_bloquants(resultats: list[Resultat]) -> int:
@@ -52,11 +54,45 @@ def outils_muets(resultats: list[Resultat]) -> list[Resultat]:
             and not r.resume.startswith("NON EXECUTE (mode --rapide)")]
 
 
-# Pour le hook seulement : rien ne bloque, mais des outils n'ont rien vérifié.
-# Sans ce code, le hook concluait « Lintorn OK » sous la liste des outils muets
-# — et c'est la dernière ligne qu'on lit. Hors du hook, 0 : la CI ne doit pas
-# échouer sur un outil absent.
+# Pour le hook seulement : rien ne bloque, mais ce push n'a pas été vérifié en
+# entier. Sans ce code, le hook concluait « Lintorn OK » sous la liste des
+# outils muets, et c'est la dernière ligne qu'on lit. Hors du hook, 0 : la CI
+# ne doit pas échouer sur un outil absent.
 NON_VERIFIE = 3
+
+
+def lacunes_du_push(resultats: list[Resultat]) -> list[str]:
+    """Ce que ce push n'a PAS fait vérifier : une ligne courte par raison.
+
+    ⚠️ Seuls les outils muets comptaient. Un guillemet oublié dans
+    `regles.toml` retirait toutes les règles maison, un push ne contenait que
+    des fichiers qu'aucun contrôle ne lit, le disque n'était pas ce qui
+    partait, un outil maison avait planté, le hook ne savait pas ce qui
+    partait : le hook concluait quand même « Lintorn OK ».
+    """
+    lacunes = []
+    muets = outils_muets(resultats)
+    if muets:
+        lacunes.append(f"{len(muets)} outil(s) n'ont rien verifie : "
+                       + ", ".join(r.titre for r in muets)
+                       + " (souvent : `lintorn confiance`, une fois, dans un terminal)")
+    # Un bloquant en panne a déjà refusé le push : ne restent ici que les autres.
+    en_panne = [r for r in resultats
+                if r.statut == "ERREUR" and r.titre not in outillage.TITRES_OUTILLAGE]
+    if en_panne:
+        lacunes.append(f"{len(en_panne)} outil(s) en panne n'ont rien verifie : "
+                       + ", ".join(r.titre for r in en_panne))
+    if any(r.titre == configuration.TITRE and r.statut == "ALERTE" for r in resultats):
+        autres = len(config.SOUCIS_CONFIG) - 1
+        lacunes.append("ta configuration n'est pas entierement chargee : "
+                       + (config.SOUCIS_CONFIG[0] if config.SOUCIS_CONFIG else "voir le rapport")
+                       + (f" (+ {autres} autre(s) dans le rapport)" if autres > 0 else ""))
+    for r in resultats:
+        if (r.titre == focus.TITRE and r.statut == "INDISPONIBLE") or r.titre == focus.TITRE_LISTE:
+            lacunes.append(r.resume)
+        elif r.titre == focus.TITRE_ECART:
+            lacunes.append(f"{r.resume} (Lintorn a lu ton disque)")
+    return lacunes
 
 
 def afficher(resultats: list[Resultat], rapport_ecrit: bool, manque_config: bool,
@@ -76,10 +112,12 @@ def afficher(resultats: list[Resultat], rapport_ecrit: bool, manque_config: bool
     if rapport_ecrit:
         # `_relatif` et pas `relative_to` : une sortie rangee ailleurs que sous
         # la racine leve, et faisait tomber Lintorn APRES tous les controles.
-        print(f"\nLe rapport de Lintorn : {chemins.relatif(config.RAPPORT)}"
-              + (f"  ·  la meme chose en page web : "
-                 f"{chemins.relatif(config.RAPPORT.with_suffix('.html'))}"
-                 if config.RAPPORT.with_suffix(".html").is_file() else ""))
+        rapport = config.rapport_du(hook)
+        print(f"\n{'Le rapport de ce push' if hook else 'Le rapport de Lintorn'} : "
+              f"{chemins.relatif(rapport)}"
+              + (f"  -  la meme chose en page web : "
+                 f"{chemins.relatif(rapport.with_suffix('.html'))}"
+                 if rapport.with_suffix(".html").is_file() else ""))
 
     if manque_config:
         print("\nCe projet n'a pas encore de configuration Lintorn.")
@@ -90,6 +128,11 @@ def afficher(resultats: list[Resultat], rapport_ecrit: bool, manque_config: bool
         for r in echecs:
             print(f"    - {r.titre}")
         signaler_non_bloquants(resultats)
+        ecart = next((r for r in resultats
+                      if r.titre in (focus.TITRE_ECART, focus.TITRE_LISTE)), None)
+        if hook and ecart:
+            # Le refus peut venir de ce qui est sur le disque et ne part PAS.
+            print(f"Attention : Lintorn a lu ton disque, pas ce que tu pousses ({ecart.resume}).")
         return 1
     # ⚠️ LE FAUX VERT DU DERNIER ETAGE.
     #
@@ -105,6 +148,7 @@ def afficher(resultats: list[Resultat], rapport_ecrit: bool, manque_config: bool
         # VERIF compte : « 6 chemins verifies, 2 a confirmer » a bien tourne.
         if r.statut in ("OK", "ALERTE", "ERREUR", "VERIF")
         and r.titre not in outillage.TITRES_OUTILLAGE
+        and r.titre not in (focus.TITRE_ECART, focus.TITRE_LISTE)
     ]
     if not a_tourne:
         print("AUCUN controle n'a pu tourner sur ce projet.")
@@ -121,7 +165,15 @@ def afficher(resultats: list[Resultat], rapport_ecrit: bool, manque_config: bool
         print("Rien a signaler sur ce qui a tourne.")
     else:
         print("Lintorn n'a rien a signaler : tous les controles bloquants sont au vert.")
-    if muets:
-        print(f"{len(muets)} outil(s) n'ont rien verifie : "
-              + ", ".join(r.titre for r in muets))
-    return NON_VERIFIE if muets and hook else 0
+    if not hook:
+        if muets:
+            print(f"{len(muets)} outil(s) n'ont rien verifie : "
+                  + ", ".join(r.titre for r in muets))
+        return 0
+    lacunes = lacunes_du_push(resultats)
+    if not lacunes:
+        return 0
+    print("Ce push n'est PAS verifie en entier :")
+    for lacune in lacunes:
+        print(f"    - {lacune}")
+    return NON_VERIFIE

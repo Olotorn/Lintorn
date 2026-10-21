@@ -81,7 +81,7 @@ def _fichiers_sous(racine: Path, index: dict, illisibles: set[str]) -> list[Path
                        if chemin.is_relative_to(config.RACINE) else str(chemin))
 
     if racine not in index:
-        sorties = {config.RAPPORT, config.RAPPORT_HTML, config.ETAT}
+        sorties = config.sorties_de_lintorn()
         trouves = []
         for dossier, sous_dossiers, noms in os.walk(racine, onerror=_dossier_illisible):
             sous_dossiers[:] = [nom for nom in sous_dossiers if nom not in config.IGNORES]

@@ -38,8 +38,8 @@ def _cloture(texte: str) -> str:
     return "`" * max(3, plus_longue + 1)
 
 
-def ecrire_rapport(resultats: list[Resultat]) -> bool:
-    """Écrit le rapport. Rend False — et le dit — s'il n'a pas pu l'être.
+def ecrire_rapport(resultats: list[Resultat], hook: bool = False) -> bool:
+    """Écrit le rapport, celui du push à part. Rend False, et le dit, s'il n'a pas pu l'être.
 
     Un dossier en lecture seule (CI, image montée) faisait planter Lintorn
     APRÈS que tous les contrôles avaient tourné : le verdict était perdu.
@@ -48,13 +48,17 @@ def ecrire_rapport(resultats: list[Resultat]) -> bool:
     # millisecondes d'écart pouvaient tomber de part et d'autre d'une minute,
     # et le même audit semblait en être deux.
     moment = datetime.now()
+    rapport = config.rapport_du(hook)
     lignes = [
         f"# Le rapport de Lintorn — {config.RACINE.name}",
         "",
         # La VERSION : un hook peut lancer un autre Lintorn que celui du
         # projet (celui du système, plus vieux). Sans elle, rien ne le montrait.
-        f"> Généré le {moment:%d/%m/%Y %H:%M} par `lintorn {__version__}`.",
-        "> **Fichier régénéré à chaque exécution — ne rien y écrire à la main.**",
+        f"> Généré le {moment:%d/%m/%Y %H:%M} par `lintorn {__version__}`, "
+        + ("**pendant un push**. Tes commandes (`lintorn`, `lintorn rapide`…) écrivent "
+           f"`{config.rapport_du(False).name}`." if hook else
+           f"**hors push**. Le dernier push a le sien : `{config.rapport_du(True).name}`."),
+        "> **Fichier régénéré à chaque exécution : ne rien y écrire à la main.**",
         "",
         "| Contrôle | Statut | Résumé |",
         "|---|---|---|",
@@ -77,7 +81,7 @@ def ecrire_rapport(resultats: list[Resultat]) -> bool:
             lignes += [cloture, detail, cloture]
 
     try:
-        base.ecrire_sortie(config.RAPPORT, "\n".join(lignes) + "\n")
+        base.ecrire_sortie(rapport, "\n".join(lignes) + "\n")
     except OSError as erreur:
         print(f"Rapport NON ecrit ({erreur}) - le verdict ci-dessous reste valable.")
         return False
@@ -88,9 +92,9 @@ def ecrire_rapport(resultats: list[Resultat]) -> bool:
     # À CÔTÉ du Markdown, par construction : deux chemins réglés séparément
     # finissent par diverger (c'est arrivé dans les tests, qui redirigeaient
     # l'un et pas l'autre).
-    page = config.RAPPORT.with_suffix(".html")
+    page = rapport.with_suffix(".html")
     try:
-        base.ecrire_sortie(page, html.page(resultats, moment))
+        base.ecrire_sortie(page, html.page(resultats, moment, hook))
     except OSError as erreur:
         # ⚠️ La page d'un audit PRÉCÉDENT, laissée à côté d'un rapport neuf,
         # le contredirait : deux verdicts pour un même projet. Si on ne peut

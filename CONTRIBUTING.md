@@ -1,73 +1,88 @@
-# Contributing to Lintorn
+# Contribuer à Lintorn
 
-Thanks for your interest. Please read this before opening a pull request.
+Merci de ton intérêt. Lis ceci avant d'ouvrir une merge request.
 
-## Current status
+## Où en est le projet
 
-**Lintorn is not yet open to outside code contributions.** The project is young and
-its internals still move quickly. Pull requests will be politely declined for now.
+**Lintorn n'est pas encore ouvert aux contributions de code extérieures.** Le projet est
+jeune, et son intérieur bouge encore vite. Pour l'instant, les merge requests seront
+poliment refusées.
 
-What *is* welcome, and genuinely useful:
+Ce qui est bienvenu, et vraiment utile :
 
-- **Bug reports** — especially a check that goes silently wrong. A check that reports
-  `OK` while verifying nothing is the worst failure this project knows, and the hardest
-  to spot from the inside.
-- **Feature ideas**, as issues.
-- **Reports from other stacks** — Lintorn was born on a Django + React project. If the
-  detection misfires on your layout, that is valuable information.
+- **Les rapports de bug**, surtout sur un contrôle qui se trompe en silence. Un contrôle qui
+  affiche `OK` sans rien vérifier est la pire panne que connaisse ce projet, et la plus
+  dure à repérer de l'intérieur.
+- **Les idées de fonctionnalités**, en ticket (*issue*).
+- **Les retours d'autres environnements** : Lintorn est né sur un projet Django + React.
+  Si sa détection se trompe sur l'organisation de ton projet, c'est une information
+  précieuse.
 
-## When contributions open: the CLA
+## Quand les contributions ouvriront : le CLA
 
-Code contributions will require signing a **Contributor License Agreement** before a
-pull request can be merged. No exceptions, including for one-line changes.
+Pour contribuer du code, il faudra signer un **CLA** (*Contributor License Agreement*,
+l'accord de licence du contributeur) avant que ta merge request puisse être fusionnée.
+Sans exception, même pour une modification d'une ligne.
 
-### Why
+### Pourquoi
 
-Lintorn is released under the **AGPL-3.0**, and is also available under a commercial
-license for organisations that cannot comply with the AGPL's source-disclosure
-requirement.
+Lintorn est publié sous **AGPL-3.0**. Il existe aussi sous licence commerciale, pour les
+organisations qui ne peuvent pas respecter l'obligation de l'AGPL de publier leur code
+source.
 
-That dual model only works while a **single party holds the rights to the whole
-codebase**. By default, a contributor keeps copyright over the code they write — so a
-single merged pull request without a CLA would make it legally impossible to grant a
-commercial license covering that code, permanently and retroactively.
+Cette double licence ne tient que tant qu'**un seul détenteur possède les droits sur tout
+le code**. Par défaut, un contributeur garde le copyright du code qu'il écrit : une seule
+merge request fusionnée sans CLA rendrait donc juridiquement impossible, définitivement et
+rétroactivement, d'accorder une licence commerciale qui couvre ce code.
 
-The CLA is not a formality. It is what keeps the project sustainable.
+Le CLA n'est pas une formalité : c'est ce qui permet au projet de durer.
 
-### What it will say
+### Ce qu'il contiendra
 
-The agreement will follow the shape of the widely used
-[Apache Individual CLA](https://www.apache.org/licenses/icla.pdf):
+L'accord suivra le modèle, très répandu, de
+l'[Apache Individual CLA](https://www.apache.org/licenses/icla.pdf) :
 
-- you **keep** the copyright on your contribution;
-- you grant a perpetual, worldwide, irrevocable licence to use, modify, sublicense
-  and relicense it — which is what makes commercial licensing possible;
-- you confirm you have the right to contribute the code (that it is yours, and that no
-  employer or client has a claim on it).
+- tu **gardes** le copyright de ta contribution ;
+- tu accordes une licence perpétuelle, mondiale et irrévocable pour l'utiliser, la
+  modifier, la sous-licencier et la placer sous une autre licence (c'est ce qui rend la
+  licence commerciale possible) ;
+- tu confirmes avoir le droit de proposer ce code : il est à toi, et aucun employeur ni
+  client n'a de droit dessus.
 
-Signing is expected to be handled automatically on each pull request.
+La signature devrait se faire automatiquement, à chaque merge request.
 
-### If you contribute on company time
+### Si tu contribues sur ton temps de travail
 
-Check with your employer first. In many jurisdictions, code written during working
-hours belongs to the employer, and you cannot grant these rights alone. This is the
-most common reason a CLA cannot be signed — better to find out before writing the code.
+Demande d'abord à ton employeur. Dans beaucoup de pays, le code écrit pendant les heures
+de travail appartient à l'employeur, et tu ne peux pas accorder ces droits seul. C'est la
+raison la plus courante pour laquelle un CLA ne peut pas être signé : mieux vaut le savoir
+avant d'écrire le code.
 
-## If you fork instead
+## Si tu préfères forker
 
-You are free to fork under the AGPL-3.0. Two obligations come with it: keep the same
-licence, and publish your source — including when you offer the software over a
-network, which is the specific point of the AGPL compared to the GPL.
+Tu es libre de forker Lintorn sous AGPL-3.0. Deux obligations viennent avec : garder la
+même licence, et publier ton code source, y compris quand tu proposes le logiciel à
+travers un réseau. C'est précisément ce que l'AGPL ajoute à la GPL.
 
-You may not use the name **Lintorn** for a fork in a way that suggests it is this
-project, or that it is endorsed by it.
+Tu ne peux pas utiliser le nom **Lintorn** pour un fork d'une manière qui laisserait croire
+que c'est ce projet, ou que ce projet l'approuve.
 
-## Development setup
+## Développer
 
-See `CLAUDE.md` for the rules that apply when working on Lintorn itself: the founding
-principle, the path conventions, and how to run the test suite in both worlds (with and
-without Django).
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .          # `-e` : ton code local, pas la version publiée
+pip install ruff pytest
+
+pytest -q                 # les tests
+ruff check .              # le lint
+lintorn rapide            # Lintorn s'audite lui-même
+```
+
+Lintorn n'a aucune dépendance, et ne doit jamais en avoir : il tourne dans un hook git,
+avec le python qu'il trouve sur la machine. Bibliothèque standard uniquement.
 
 ## Questions
 
-Open an issue. For commercial licensing, contact the copyright holder: **Olotorn**.
+Ouvre un ticket (*issue*). Pour une licence commerciale, contacte le détenteur du
+copyright : **Olotorn**.

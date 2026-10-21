@@ -1134,9 +1134,8 @@ def test_toute_option_des_hooks_est_reconnue():
     """LE cas qui ne pardonne pas : une option du hook refusée, et le push
     n'est plus contrôlé — ou plus possible."""
     paquet = Path(Lintorn.__file__).parent
-    hooks = [paquet / "hooks" / "pre-push", *sorted((paquet / "hooks_claude").glob("*.sh"))]
     utilisees = set()
-    for hook in hooks:
+    for hook in (paquet / "hooks").iterdir():
         for ligne in hook.read_text(encoding="utf-8").splitlines():
             if ligne.lstrip().startswith("#") or "lintorn" not in ligne.lower():
                 continue

@@ -116,7 +116,7 @@ def regles_enoncees() -> list[tuple[str, int, str, list[str]]]:
                      and _RX_IMPERATIF.search(ligne))
             if not (forme or _RX_CONSIGNE.search(ligne)):
                 continue
-            # Sans sa puce : la phrase nomme aussi l'esquisse de `--esquisser-regles`.
+            # Sans sa puce : la phrase nomme aussi l'esquisse de `lintorn regles`.
             phrase = " ".join(_RX_PUCE.sub("", ligne.strip()).strip("|").split())
             trouvees.append((relatif, numero, phrase, jetons))
 

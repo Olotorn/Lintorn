@@ -253,17 +253,23 @@ def test_les_sequences_d_echappement_d_un_outil_n_atteignent_pas_le_rapport():
 
 
 # ── La dernière ligne du hook ────────────────────────────────────────────────
-def _audit_du_hook(tmp_path, monkeypatch, hook: bool) -> int:
+def _audit_du_hook(tmp_path, monkeypatch, hook: bool,
+                   cmd_du_second=("outil-qui-n-existe-pas-zz",), second_bloquant=True,
+                   liste="complete", lent=False) -> int:
     _projet(tmp_path, monkeypatch)
     monkeypatch.setattr(config, "RAPPORT", tmp_path / ".lintorn" / "rapport.md")
     monkeypatch.setattr(config, "RAPPORT_HTML", tmp_path / ".lintorn" / "rapport.html")
     monkeypatch.setattr(config, "COMMANDES", [
         {"cle": "a", "titre": "Outil present", "cmd": [sys.executable, "-c", "pass"],
          "cwd": tmp_path, "bloquant": True, "traduction": None, "lent": False},
-        {"cle": "b", "titre": "Outil absent", "cmd": ["outil-qui-n-existe-pas-zz"],
-         "cwd": tmp_path, "bloquant": True, "traduction": None, "lent": False}])
+        {"cle": "b", "titre": "Second outil", "cmd": list(cmd_du_second),
+         "cwd": tmp_path, "bloquant": second_bloquant, "traduction": None, "lent": False},
+        *([{"cle": "c", "titre": "Outil lent", "cmd": [sys.executable, "-c", "pass"],
+            "cwd": tmp_path, "bloquant": False, "traduction": None, "lent": True}]
+          if lent else [])])
     if hook:
         monkeypatch.setenv("LINTORN_HOOK", "1")
+        monkeypatch.setenv("LINTORN_LISTE", liste)
     else:
         monkeypatch.delenv("LINTORN_HOOK", raising=False)
     return audit.lancer(["--rapide"], [])
@@ -276,6 +282,59 @@ def test_pour_le_hook_un_outil_muet_n_est_pas_un_ok(tmp_path, monkeypatch):
 
 def test_hors_du_hook_un_outil_muet_ne_fait_pas_echouer_la_ci(tmp_path, monkeypatch):
     assert _audit_du_hook(tmp_path, monkeypatch, hook=False) == 0
+
+
+def test_pour_le_hook_un_outil_en_panne_n_est_pas_un_ok(tmp_path, monkeypatch, capsys):
+    """Une commande maison non bloquante qui plante : « [ERR!] l'outil a plante »,
+    puis « Lintorn OK, push autorise »."""
+    panne = (sys.executable, "-c", "import sys; sys.exit(2)")
+
+    code = _audit_du_hook(tmp_path, monkeypatch, hook=True, cmd_du_second=panne,
+                          second_bloquant=False)
+
+    assert code == console.NON_VERIFIE
+    assert "en panne n'ont rien verifie : Second outil" in capsys.readouterr().out
+
+
+_PRESENT = (sys.executable, "-c", "pass")
+
+
+def test_l_audit_complet_qui_vient_de_tourner_ne_dit_pas_jamais_lance(tmp_path, monkeypatch, capsys):
+    """Sa ligne était jugée avant que la date soit notée : « jamais lance » sous
+    l'audit complet lui-même."""
+    _audit_du_hook(tmp_path, monkeypatch, hook=False, cmd_du_second=_PRESENT, lent=True)
+    capsys.readouterr()
+    (tmp_path / ".lintorn" / "etat.json").unlink(missing_ok=True)
+    monkeypatch.setattr(config, "CONTROLES_INTERNES", {"audit_complet": True})
+
+    audit.lancer([], [])
+
+    sortie = capsys.readouterr().out
+    assert "lance il y a 0 jour(s)" in sortie, sortie
+
+
+def test_pour_le_hook_une_liste_incomplete_de_ce_qui_part_n_est_pas_un_ok(
+        tmp_path, monkeypatch, capsys):
+    """git n'a pas su lister tout ce qui part : le focus ne couvre pas ces fichiers."""
+    assert _audit_du_hook(tmp_path, monkeypatch, hook=True, cmd_du_second=_PRESENT) == 0
+    capsys.readouterr()
+
+    code = _audit_du_hook(tmp_path, monkeypatch, hook=True, cmd_du_second=_PRESENT,
+                          liste="echec")
+
+    assert code == console.NON_VERIFIE
+    assert "git n'a pas su lister tous les fichiers qui partent" in capsys.readouterr().out
+
+
+def test_ce_que_lintorn_affiche_dans_le_terminal_reste_en_ascii(tmp_path, monkeypatch, capsys):
+    """Sous Windows, la sortie que lit pre-commit n'est pas décodée comme Lintorn
+    l'écrit : un « · » ou un « — » y devenait « � », à chaque push."""
+    _audit_du_hook(tmp_path, monkeypatch, hook=True, liste="echec", lent=True)
+
+    sortie = capsys.readouterr().out
+    assert "NON EXECUTE (mode --rapide)" in sortie
+    assert "en page web" in sortie
+    assert sortie.isascii(), sorted({c for c in sortie if not c.isascii()})
 
 
 @POSIX

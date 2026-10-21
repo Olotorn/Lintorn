@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
-from aides import _hook_pose, _hors_cp1252, _regle
+from aides import _hook_pose, _hors_ascii, _regle
 
 import lintorn.commandes
 import lintorn.controles
@@ -192,15 +192,14 @@ def test_une_regle_qu_on_n_a_pas_su_situer_est_quand_meme_nommee():
 # Ce qui s'imprime dans une console reste en ASCII
 # ─────────────────────────────────────────────────────────────────────────────
 def _litteraux(noeud):
-    """Les morceaux littéraux d'une chaîne, f-string et concaténation comprises."""
-    if isinstance(noeud, ast.Constant) and isinstance(noeud.value, str):
-        return [noeud.value]
-    if isinstance(noeud, ast.JoinedStr):
-        return [v.value for v in noeud.values
-                if isinstance(v, ast.Constant) and isinstance(v.value, str)]
-    if isinstance(noeud, ast.BinOp):
-        return _litteraux(noeud.left) + _litteraux(noeud.right)
-    return []
+    """Tous les morceaux littéraux d'une expression, où qu'ils soient.
+
+    ⚠️ Lire seulement les f-strings et les concaténations laissait passer
+    `"..." + (f"  ·  ..." if ... else "")` : le « · » de la ligne du rapport
+    est arrivé sous Windows par ce chemin-là.
+    """
+    return [n.value for n in ast.walk(noeud)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)]
 
 
 
@@ -224,11 +223,10 @@ def test_la_console_ne_peut_plus_planter_sur_un_caractere():
 def test_ce_qui_s_imprime_reste_lisible_sur_une_console_etroite():
     """Ce qui part vers la console doit s'AFFICHER, pas seulement ne pas planter.
 
-    ⚠️ La contrainte n'est PAS « de l'ASCII ». cp1252 contient les accents,
-    les guillemets francais et le tiret cadratin — ils s'affichent tres bien.
-    Ce qui manque a cette table, ce sont les symboles, les fleches, le dessin
-    de boites et les emoji. Depuis `_console_sure()`, ils ne font plus
-    planter ; ils s'affichent « ? », ce qui reste illisible.
+    ⚠️ cp1252 ne suffit pas. Sous Windows, python écrit en cp1252 quand sa
+    sortie n'est pas une console, et pre-commit la relit en UTF-8 : un « · »,
+    pourtant dans cp1252, s'affichait « � » à chaque push. Seul l'ASCII
+    s'affiche partout.
 
     Le RAPPORT, lui, est un fichier UTF-8 : il garde tout. Seule la console
     est etroite.
@@ -258,16 +256,16 @@ def test_ce_qui_s_imprime_reste_lisible_sur_une_console_etroite():
                 continue
             for arg in cibles:
                 for texte in _litteraux(arg):
-                    hors = _hors_cp1252(texte)
+                    hors = _hors_ascii(texte)
                     if hors:
                         fautifs.append(f"{nom}:{noeud.lineno} {hors} {texte[:45]}")
 
     for texte in (lintorn.commandes.aide.GUIDE, lintorn.commandes.aide.AIDE):
-        hors = _hors_cp1252(texte)
+        hors = _hors_ascii(texte)
         if hors:
             fautifs.append(f"texte fixe {hors}")
 
-    assert fautifs == [], "illisible sur une console cp1252 :\n  " + "\n  ".join(fautifs)
+    assert fautifs == [], "hors ASCII, donc illisible sous pre-commit Windows :\n  " + "\n  ".join(fautifs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -338,29 +336,39 @@ def test_une_doc_qui_cite_les_rapports_ne_ment_pas_sur_un_clone_neuf(tmp_path, m
     monkeypatch.setattr(config, "RAPPORT_HTML", tmp_path / ".lintorn" / "rapport.html")
     monkeypatch.setattr(config, "ETAT", tmp_path / ".lintorn" / "etat.json")
     doc = tmp_path / "README.md"
-    doc.write_text("Voir `rapport.md`, `.lintorn/rapport.html` et `etat.json`. "
+    doc.write_text("Voir `rapport.md`, `.lintorn/rapport.html` et `etat.json`, "
+                   "`rapport-push.md` et `.lintorn/rapport-push.html`. "
                    "Mais `rapport_fantome.md` n'existe pas.", encoding="utf-8")
 
     resultat = lintorn.controles.projet.doc_vs_code._verifier_documents("t", [doc], bloquant_possible=True)
 
-    assert resultat.resume.startswith("4 chemin(s) cite(s), 1 introuvable(s)")
+    assert resultat.resume.startswith("6 chemin(s) cite(s), 1 introuvable(s)")
     assert "rapport_fantome.md" in resultat.detail
 
 
-def test_les_deux_rapports_portent_le_meme_moment_et_la_meme_version(tmp_path, monkeypatch):
+@pytest.mark.parametrize("hook, nom, quand", [
+    (False, "rapport", "hors push"),
+    (True, "rapport-push", "pendant un push"),
+], ids=["commande", "push"])
+def test_les_deux_rendus_portent_le_meme_moment_la_meme_version_et_d_ou_ils_viennent(
+        tmp_path, monkeypatch, hook, nom, quand):
     """Vu par le dev : un `rapport.md` neuf, une page de la veille, et rien
     pour dire qu'ils ne venaient ni du meme passage, ni du meme Lintorn."""
     monkeypatch.setattr(config, "RACINE", tmp_path)
     monkeypatch.setattr(config, "RAPPORT", tmp_path / ".lintorn" / "rapport.md")
 
-    assert lintorn.rapport.markdown.ecrire_rapport([Resultat("Ruff", "OK", "rien a signaler")]) is True
+    assert lintorn.rapport.markdown.ecrire_rapport(
+        [Resultat("Ruff", "OK", "rien a signaler")], hook=hook) is True
 
-    markdown = (tmp_path / ".lintorn" / "rapport.md").read_text(encoding="utf-8")
-    page = (tmp_path / ".lintorn" / "rapport.html").read_text(encoding="utf-8")
-    jour, heure, version = re.search(
-        r"Généré le (\S+) (\S+) par `lintorn ([^`]+)`", markdown).groups()
-    assert f"Généré le {jour} à {heure} par lintorn {version}." in page
+    markdown = (tmp_path / ".lintorn" / f"{nom}.md").read_text(encoding="utf-8")
+    page = (tmp_path / ".lintorn" / f"{nom}.html").read_text(encoding="utf-8")
+    jour, heure, version, origine = re.search(
+        r"Généré le (\S+) (\S+) par `lintorn ([^`]+)`, \*\*([^*]+)\*\*", markdown).groups()
+    assert f"Généré le {jour} à {heure} par lintorn {version}, {quand}." in page
     assert version == __version__
+    assert origine == quand
+    assert f"<code>{nom}.md</code>, qui reste la source" in page
+    assert sorted(p.name for p in (tmp_path / ".lintorn").iterdir()) == [f"{nom}.html", f"{nom}.md"]
 
 
 def test_une_page_qui_ne_peut_pas_etre_reecrite_ne_survit_pas(tmp_path, monkeypatch):
@@ -414,6 +422,21 @@ def test_la_page_html_n_est_pas_lue_par_les_regles_maison(tmp_path, monkeypatch)
     resultat = lintorn.controles.projet.regles_maison.controle_regles_maison()
 
     assert resultat.fichiers == {"vrai.html": "interdit : 1"}
+
+
+@pytest.mark.parametrize("sortie", ["rapport-push.md", "rapport-push.html"])
+def test_le_rapport_du_push_n_est_pas_lu_par_les_regles_maison(tmp_path, monkeypatch, sortie):
+    """Il cite les fautes qu'il a trouvées : une règle qui le lisait les
+    comptait une seconde fois, et une de plus à chaque push."""
+    (tmp_path / ".lintorn").mkdir()
+    (tmp_path / ".lintorn" / sortie).write_text("interdit interdit", encoding="utf-8")
+    (tmp_path / "vrai.md").write_text("interdit", encoding="utf-8")
+    monkeypatch.setattr(config, "RAPPORT", tmp_path / ".lintorn" / "rapport.md")
+    _regle(tmp_path, monkeypatch, suffixes=[".md", ".html"])
+
+    resultat = lintorn.controles.projet.regles_maison.controle_regles_maison()
+
+    assert resultat.fichiers == {"vrai.md": "interdit : 1"}
 
 
 @pytest.mark.skipif(os.name == "nt", reason="le hook est un script sh")

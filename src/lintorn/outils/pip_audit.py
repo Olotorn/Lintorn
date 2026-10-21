@@ -69,7 +69,12 @@ def traduire(resultat: base.Resultat) -> base.Resultat:
         touches += 1
         nom = commun.cellule(paquet.get("name", "?"), 80)
         version = commun.cellule(paquet.get("version", "?"), 40)
+        vues = set()
         for faille in failles:
+            # Une fois chacune : pip-audit peut citer deux fois la même faille.
+            if faille.get("id") in vues:
+                continue
+            vues.add(faille.get("id"))
             noms = [str(faille.get("id", "?"))] + [alias for alias in commun.liste(faille.get("aliases"))
                                                    if isinstance(alias, str)]
             corrige = ", ".join(f"`{commun.cellule(version_sure, 40)}`"
@@ -104,7 +109,7 @@ def traduire(resultat: base.Resultat) -> base.Resultat:
     if non_audites:
         lignes += ["", *non_audites]
     lignes += ["", "Corriger : `lintorn pip-audit` liste les montees, "
-               "`--maj-securite --appliquer` les installe et repingle `requirements.txt`."]
+               "`lintorn pip-audit --appliquer` les installe et repingle `requirements.txt`."]
     resultat.detail = "\n".join(lignes)
     resultat.resume = f"{touches} paquet(s) vulnerable(s)"
     resultat.detail_markdown = True

@@ -60,10 +60,12 @@ from .ecosystemes import (
 )
 from .projet import (
     IGNORES as IGNORES,
+    LIMITE_HORS_GIT as LIMITE_HORS_GIT,
     _fichiers_du_projet as _fichiers_du_projet,
     _hooks_pour_git as _hooks_pour_git,
     _ignores_par_git as _ignores_par_git,
     _racine_projet as _racine_projet,
+    _sans_le_depot_du_hook as _sans_le_depot_du_hook,
     _sommet_git as _sommet_git,
     _sous_git as _sous_git,
     git as git,
@@ -126,6 +128,9 @@ _SOUCIS_PRECOCES: list[str] = []
 
 RACINE = _racine_projet()
 
+# Avant toute question à git : posé par un worktree, GIT_DIR la fausserait.
+_sans_le_depot_du_hook()
+
 
 # Trois contrôles en dépendent entièrement — le hook pre-push, la fraîcheur
 # des mémoires, et le périmètre `.gitignore`. Sans dépôt, ils ne peuvent rien
@@ -136,6 +141,10 @@ SOUS_GIT = _sous_git()
 # Calculé une fois, AVANT la détection : savoir où vit le code est ce qui
 # distingue un projet d'un simple fichier de configuration posé là.
 _FICHIERS = _fichiers_du_projet()
+# Hors dépôt, un dossier trop gros pour être un projet (le dossier personnel,
+# `/`) : son parcours s'est arrêté en route. `cli.py` refuse alors d'auditer
+# une moitié de dossier, et rien d'autre ne le reparcourt.
+PARCOURS_COUPE = not SOUS_GIT and len(_FICHIERS) >= LIMITE_HORS_GIT
 _SOURCES_PY = [fichier for fichier in _FICHIERS
                if fichier.suffix in (".py", ".pyi") and not sous_ignores(fichier)]
 
@@ -175,6 +184,13 @@ RAPPORT = DOSSIER_LINTORN / "rapport.md"
 # La MEME matiere, en page web : le Markdown reste la source, `rapport/html.py`
 # le rend. Ecrite a cote, jamais a la place.
 RAPPORT_HTML = RAPPORT.with_suffix(".html")
+
+
+def rapport_du(hook: bool) -> Path:
+    """Le rapport à écrire. Celui d'un push vit à part : un `lintorn` lancé
+    juste après l'écrasait, et la raison d'un refus était perdue. À côté de
+    `RAPPORT`, par construction, comme la page web."""
+    return RAPPORT.with_name("rapport-push.md") if hook else RAPPORT
 
 
 NPM = "npm.cmd" if sys.platform == "win32" else "npm"
@@ -340,6 +356,12 @@ VULTURE_IGNORES = PROJET.get("vulture_ignores", _VULTURE_DEFAUT)
 # qui meurt ne prévient personne (même leçon que `core.hooksPath`).
 ETAT = DOSSIER_LINTORN / "etat.json"
 JOURS_AUDIT_COMPLET = 30
+
+
+def sorties_de_lintorn() -> set[Path]:
+    """Ce que Lintorn écrit : ni lu comme un fichier du projet, ni absent d'une doc qui le cite."""
+    push = rapport_du(True)
+    return {RAPPORT, RAPPORT_HTML, push, push.with_suffix(".html"), ETAT}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

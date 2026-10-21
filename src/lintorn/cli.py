@@ -21,9 +21,16 @@ from __future__ import annotations
 
 import difflib
 import sys
+from importlib import import_module
 
-from . import config
-from .commandes import aide, audit, confiance, hook, init, outils, regles, securite
+from . import commandes
+from .commandes import aide
+
+# ⚠️ `aide` seule est importée d'office : `version`, `help` et `guide` n'ont
+# rien à savoir du projet. Les autres commandes importent `config`, qui
+# parcourt tout le dossier courant hors dépôt git : 16 s pour afficher un
+# numéro de version depuis `/usr`, et un plantage depuis `/` sous Python 3.11.
+# Elles passent donc par `commandes.<nom>`, importé au moment de servir.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -66,14 +73,24 @@ def _console_sure() -> None:
 COMMANDES = [
     (("-h", "--help", "--aide"), lambda args: aide.afficher_aide()),
     (("-V", "--version"), lambda args: aide.afficher_version()),
-    (("--confiance",), lambda args: confiance.accorder(sans_demander="--oui" in args)),
-    (("--installer-hook",), lambda args: hook.installer_hook()),
-    (("--installer-outils",), lambda args: outils.installer_outils(sans_demander="--oui" in args)),
+    (("--confiance",), lambda args: commandes.confiance.accorder(sans_demander="--oui" in args)),
+    (("--installer-hook",), lambda args: commandes.hook.installer_hook(forcer="--force" in args)),
+    (("--installer-outils",),
+     lambda args: commandes.outils.installer_outils(sans_demander="--oui" in args)),
     (("--guide",), lambda args: aide.afficher_guide()),
-    (("--init",), lambda args: init.init(ecraser="--force" in args)),
-    (("--esquisser-regles",), lambda args: regles.esquisser_regles()),
-    (("--maj-securite",), lambda args: securite.maj_securite(appliquer="--appliquer" in args)),
+    (("--init",), lambda args: commandes.init.init(ecraser="--force" in args)),
+    (("--esquisser-regles",), lambda args: commandes.regles.esquisser_regles()),
+    (("--maj-securite",),
+     lambda args: commandes.securite.maj_securite(appliquer="--appliquer" in args)),
 ]
+
+# Ce qui répond sans rien savoir du projet : jamais arrêté par `_pas_un_projet`.
+_SANS_PROJET = {"-h", "--help", "--aide", "-V", "--version", "--guide"}
+
+
+def _config():
+    """`config`, importé seulement quand une commande en a besoin (voir plus haut)."""
+    return import_module(".config", __package__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LES NOMS COURTS — `lintorn rapide` au lieu de `lintorn --rapide`
@@ -115,6 +132,11 @@ def _traduire_nom_court(args: list[str]) -> list[str]:
 # sans seconde liste à tenir à jour.
 _OPTIONS_AUDIT = {"--rapide", "--doc", "--fichiers", "--fichiers-stdin"}
 _PRECISIONS = {"--force", "--oui", "--appliquer"}     # lues par une commande
+# La commande que chaque précision précise. Seule, `--force` lançait un audit
+# complet sans rien dire de l'option qu'on venait de taper.
+_PRECISIONS_DE = {"--force": ("--init", "--installer-hook"),
+                  "--oui": ("--confiance", "--installer-outils"),
+                  "--appliquer": ("--maj-securite",)}
 OPTIONS = ({option for options, _ in COMMANDES for option in options}
            | _OPTIONS_AUDIT | _PRECISIONS)
 
@@ -136,6 +158,7 @@ def _separer(args: list[str]) -> tuple[list[str], list[str]]:
         return args[:coupure], args[coupure + 1:]
     if "--fichiers" not in args:
         return args, []
+    config = _config()
     debut = args.index("--fichiers") + 1
     options, fichiers = args[:debut], []
     for arg in args[debut:]:
@@ -217,10 +240,35 @@ def main() -> int:
     # Les fichiers passés après `--` ne sont JAMAIS des options.
     args, apres_separateur = _separer(args)
 
-    for options, commande in COMMANDES:
-        if set(options) & set(args):
-            return commande(args)
-    return audit.lancer(args, apres_separateur)
+    for precision, commandes_visees in _PRECISIONS_DE.items():
+        if precision in args and not set(commandes_visees) & set(args):
+            noms = {forme: nom for nom, (forme, *_) in NOMS_COURTS.items()}
+            print(f"{precision} ne va qu'avec : "
+                  + ", ".join(f"lintorn {noms.get(c, c)}" for c in commandes_visees))
+            print("Rien n'a ete lance.")
+            return 2
+
+    options, commande = next(
+        ((options, commande) for options, commande in COMMANDES if set(options) & set(args)),
+        ((), lambda args: commandes.audit.lancer(args, apres_separateur)))
+    if not set(options) & _SANS_PROJET and _pas_un_projet():
+        return 2
+    return commande(args)
+
+
+def _pas_un_projet() -> bool:
+    """Hors dépôt git, un dossier trop gros pour être un projet : le dire, ne rien lancer.
+
+    Auditer la moitié d'un dossier personnel n'apprend rien à personne, et
+    l'audit entier y durait plusieurs minutes.
+    """
+    config = _config()
+    if not config.PARCOURS_COUPE:
+        return False
+    print(f"Ce dossier n'est pas un depot git, et il a plus de {config.LIMITE_HORS_GIT} fichiers :")
+    print("ce n'est sans doute pas un projet (ton dossier personnel ?). Rien n'a ete lance.")
+    print("Lance Lintorn depuis le dossier d'un projet : dans un depot git, il n'a pas de limite.")
+    return True
 
 
 if __name__ == "__main__":

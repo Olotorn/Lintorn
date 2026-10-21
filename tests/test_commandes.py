@@ -1,5 +1,9 @@
 """Les noms courts (`lintorn rapide`) : plus simples à taper, et ils ne cassent rien."""
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from lintorn import cli, config, noyau
@@ -77,6 +81,20 @@ def test_une_precision_mal_tapee_n_est_pas_proposee_comme_commande(monkeypatch, 
     assert "lintorn --force" not in sortie
 
 
+@pytest.mark.parametrize("precision, attendu", [
+    ("--force", "lintorn init, lintorn hook"), ("--oui", "lintorn confiance, lintorn outils"),
+    ("--appliquer", "lintorn pip-audit")])
+def test_une_precision_seule_ne_lance_rien(monkeypatch, capsys, precision, attendu):
+    """`lintorn --force` lançait un audit complet sans rien dire de l'option tapée."""
+    monkeypatch.setattr(cli.commandes.audit, "lancer",
+                        lambda *_: pytest.fail("un audit a ete lance"))
+
+    code, sortie = _taper(monkeypatch, capsys, precision)
+
+    assert code == 2
+    assert f"{precision} ne va qu'avec : {attendu}" in sortie
+
+
 def test_sans_rien_d_approchant_la_liste_courte_des_commandes(monkeypatch, capsys):
     code, sortie = _taper(monkeypatch, capsys, "blabla")
 
@@ -113,3 +131,57 @@ def test_lintorn_outils_montre_le_venv_sans_le_chemin_de_la_machine(tmp_path, mo
     affiche = capsys.readouterr().out
     assert "(.venv/bin/python)" in affiche
     assert str(tmp_path) not in affiche
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hors d'un projet : répondre tout de suite, ne pas parcourir le disque
+# ─────────────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("commande", ["version", "help", "guide"])
+def test_version_aide_et_guide_ne_lisent_pas_le_projet(tmp_path, commande):
+    """`cli` importait `config` d'office, qui parcourt tout le dossier courant hors
+    dépôt : `lintorn version` prenait 16 s depuis `/usr`, et plantait depuis `/`
+    sous Python 3.11 (`PermissionError` sur `/proc`)."""
+    script = ("import sys\nfrom lintorn import cli\n"
+              f"sys.argv = ['lintorn', {commande!r}]\ncode = cli.main()\n"
+              "print('CONFIG' if 'lintorn.config' in sys.modules else 'SANS CONFIG', code)")
+    sortie = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True,
+                            text=True, timeout=60, check=False)
+
+    assert sortie.stdout.splitlines()[-1] == "SANS CONFIG 0", sortie.stdout + sortie.stderr
+
+
+def test_hors_depot_le_parcours_s_arrete_a_la_limite(tmp_path, monkeypatch):
+    for numero in range(12):
+        (tmp_path / f"f{numero}.txt").write_text("", encoding="utf-8")
+    monkeypatch.setattr(config, "RACINE", tmp_path)
+    monkeypatch.setattr(config, "SOUS_GIT", False)
+    monkeypatch.setattr(config, "LIMITE_HORS_GIT", 5)
+
+    assert len(config._fichiers_du_projet()) == 5
+
+
+def test_un_dossier_trop_gros_pour_un_projet_n_est_pas_audite(monkeypatch, capsys):
+    """Depuis le dossier personnel, l'audit durait plusieurs minutes, sur une moitié de dossier."""
+    monkeypatch.setattr(config, "PARCOURS_COUPE", True)
+
+    code, sortie = _taper(monkeypatch, capsys, "rapide")
+
+    assert code == 2
+    assert "n'est pas un depot git" in sortie
+    assert "Rien n'a ete lance" in sortie
+    monkeypatch.setattr("sys.argv", ["lintorn", "version"])
+    assert cli.main() == 0, "la version, elle, n'a besoin de rien savoir du projet"
+
+
+def test_aucun_texte_ne_donne_un_ancien_nom_de_commande():
+    """Le rapport conseillait encore `--maj-securite --appliquer`. Les anciennes
+    formes marchent toujours, mais seule la table de `cli.py` doit les citer."""
+    anciens = ("--maj-securite", "--installer-hook", "--installer-outils", "--esquisser-regles")
+    paquet = Path(cli.__file__).parent
+    fautifs = [f"{fichier.relative_to(paquet)} : {ancien}"
+               for fichier in sorted(paquet.rglob("*")) if fichier.is_file()
+               and fichier.name != "cli.py" and fichier.suffix != ".pyc"
+               for ancien in anciens if ancien in fichier.read_text(encoding="utf-8")]
+
+    assert not fautifs
+

@@ -6,8 +6,9 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from pathlib import Path
 
-from .. import base, confiance, config, noyau
+from .. import base, chemins, confiance, config, noyau
 from ..outils import pip_audit
 
 
@@ -82,8 +83,9 @@ def maj_securite(appliquer: bool) -> int:
             sans_correctif.append(paquet["name"])
             continue
         cible = max(corrections, key=_version_tuple)
+        # Une fois chacune : pip-audit peut citer deux fois la même faille.
         plan.append((paquet["name"], paquet["version"], cible,
-                     sorted(v["id"] for v in vulns)))
+                     sorted({str(v["id"]) for v in vulns if v.get("id")})))
 
     if not plan and not sans_correctif:
         print("Aucune faille connue. Tout est OK.")
@@ -99,7 +101,7 @@ def maj_securite(appliquer: bool) -> int:
 
     if not appliquer:
         print("\nSIMULATION : rien n'a ete touche. Pour appliquer :")
-        print("    lintorn pip-audit      --appliquer")
+        print("    lintorn pip-audit --appliquer")
         return 0
 
     print("\nInstallation...")
@@ -120,44 +122,101 @@ def maj_securite(appliquer: bool) -> int:
             print("       " + (derniere[-1][:120] if derniere else "(pip n'a rien dit)"))
 
     fichier = config.REQUIREMENTS or racine / "requirements.txt"
-    epingles = _repingler(fichier, reussis) if reussis else 0
+    regles = _repingler(fichier, reussis, _sans_ligne(fichier.parent)) if reussis else 0
 
     print("\nA FAIRE MAINTENANT : une montee de version peut casser :")
-    print(f"    {config.PYTHON} -m pytest -q")
+    print(f"    {chemins.relatif(Path(config.PYTHON))} -m pytest -q")
     print("    lintorn")
-    return 0 if len(reussis) == len(plan) == epingles else 1
+    return 0 if len(reussis) == len(plan) == regles else 1
 
 
-def _repingler(fichier, reussis: list[tuple[str, str]]) -> int:
-    """Repingle `requirements.txt` sur ce qui s'est RÉELLEMENT installé.
+# Celui de `dependances.py`, qui ne s'importe pas : il lit sa ligne de commande dès l'import.
+def _normaliser(nom: str) -> str:
+    return re.sub(r"[-_.]+", "-", nom).strip().lower()
 
-    Rend le nombre de lignes vraiment changées  et le dit, paquet par paquet.
-    Annoncer « repingle » sans avoir rien changé laissait le venv et le fichier
-    en désaccord, exactement la panne que « Dependances vs venv » dénonce.
 
+def _sans_ligne(dossier) -> dict[str, str]:
+    """Pourquoi chaque paquet sans ligne est là (`dependances.sans_ligne`), demandé au python DU projet.
+
+    Vide si la question échoue : chaque paquet reste alors à épingler.
     """
     try:
-        texte = fichier.read_text(encoding="utf-8")
-    except (OSError, ValueError) as erreur:
-        print(f"\nrequirements.txt NON repingle ({erreur}) : a faire manuellement.")
-        return 0
-    changes = 0
-    for nom, cible in reussis:
-        nom_souple = "[-_.]+".join(re.escape(morceau) for morceau in re.split(r"[-_.]+", nom))
-        texte, nombre = re.subn(
-            rf"(?im)^({nom_souple})==[^\s#;]+([ \t]*(?:[;#].*)?)$",
-            lambda trouve, cible=cible: f"{trouve.group(1)}=={cible}{trouve.group(2)}",
-            texte,
+        fini = subprocess.run(
+            [config.PYTHON, str(config.PAQUET / "dependances.py"), str(dossier), "--sans-ligne"],
+            cwd=dossier, capture_output=True, text=True, timeout=120, check=False,
         )
+        raisons = json.loads(fini.stdout) if fini.returncode == 0 else {}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    return {_normaliser(str(nom)): str(raison) for nom, raison in raisons.items()} \
+        if isinstance(raisons, dict) else {}
+
+
+# Un paquet sans ligne qui n'a pas à en avoir : ce qui l'apporte, dit à l'utilisateur.
+_APPORTE = {"outil": "apporte par les outils d'audit (pip-audit, pytest...), pas par ton projet",
+            "tire": "tire par une dependance que tu declares, sans ligne a lui"}
+
+
+def _repingler(fichier, reussis: list[tuple[str, str]], raisons=None) -> int:
+    """Repingle `requirements.txt` sur ce qui s'est RÉELLEMENT installé.
+
+    Rend le nombre de paquets réglés, et le dit paquet par paquet. Annoncer
+    « repingle » sans avoir rien changé laissait le venv et le fichier en
+    désaccord, exactement la panne que « Dependances vs venv » dénonce.
+
+    Un paquet sans ligne qu'apporte un outil d'audit (certifi, tiré par
+    pip-audit) ou une dépendance déclarée (certifi, tiré par `requests>=2`) est
+    réglé sans ligne : « Dependances vs venv » ne le compte pas, et pip installera
+    ailleurs la version corrigée.
+    """
+    raisons = raisons or {}
+    try:
+        texte = fichier.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        texte = None
+    except UnicodeDecodeError:
+        # Lintorn le lit (`dependances.py` sait l'UTF-16 de PowerShell), mais ne le
+        # réécrit pas : changer son encodage serait une surprise de plus.
+        print("\nrequirements.txt NON repingle (il n'est pas en UTF-8) : a faire manuellement.")
+        return 0
+    except OSError as erreur:
+        print(f"\nrequirements.txt NON repingle ({erreur.strerror or erreur}) : a faire manuellement.")
+        return 0
+
+    changes, apportes, a_la_main = 0, 0, []
+    for nom, cible in reussis:
+        nombre = 0
+        if texte is not None:
+            nom_souple = "[-_.]+".join(re.escape(morceau) for morceau in re.split(r"[-_.]+", nom))
+            texte, nombre = re.subn(
+                rf"(?im)^({nom_souple})==[^\s#;]+([ \t]*(?:[;#].*)?)$",
+                lambda trouve, cible=cible: f"{trouve.group(1)}=={cible}{trouve.group(2)}",
+                texte,
+            )
         if nombre:
             changes += 1
+        elif raisons.get(_normaliser(nom)) in _APPORTE:
+            apportes += 1
+            print(f"  {nom} : {_APPORTE[raisons[_normaliser(nom)]]} - rien a epingler")
         else:
-            print(f"  {nom} : aucune ligne `{nom}==...` dans requirements.txt - a epingler a la main")
+            a_la_main.append((nom, cible))
+
+    if texte is None:
+        if a_la_main:
+            print("\nPas de requirements.txt : epingle toi-meme "
+                  + ", ".join(f"{nom}=={cible}" for nom, cible in a_la_main)
+                  + " la ou ton projet declare ses dependances.")
+        return apportes
+    for nom, _ in a_la_main:
+        print(f"  {nom} : aucune ligne `{nom}==...` dans requirements.txt - a epingler a la main")
     if changes:
         try:
             base.ecrire_fichier_du_projet(fichier, texte)
         except OSError as erreur:
-            print(f"\nrequirements.txt NON repingle ({erreur}) : a faire manuellement.")
-            return 0
-    print(f"\nrequirements.txt repingle sur {changes} paquet(s) sur {len(reussis)} installe(s).")
-    return changes
+            print(f"\nrequirements.txt NON repingle ({erreur.strerror or erreur}) :"
+                  " a faire manuellement.")
+            return apportes
+    if len(reussis) > apportes:
+        print(f"\nrequirements.txt repingle sur {changes} paquet(s) sur {len(reussis) - apportes}"
+              " a epingler.")
+    return changes + apportes

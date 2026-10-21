@@ -15,7 +15,7 @@ import json
 import sys
 from pathlib import Path
 
-from aides import _hors_cp1252, _projet_detecte, _sortie_npm, _sortie_osv
+from aides import _hors_ascii, _projet_detecte, _sortie_npm, _sortie_osv
 
 import lintorn.commandes
 import lintorn.controles
@@ -164,7 +164,7 @@ def test_npm_audit_presente_ses_failles_de_la_plus_grave_a_la_moins_grave():
     assert "via `@vitest/mocker`" in resultat.detail
     assert "MAJEURE" in resultat.detail, "une montee majeure doit s'annoncer comme telle"
     assert resultat.detail_markdown
-    assert not _hors_cp1252(resultat.resume), "le resume part vers la console"
+    assert not _hors_ascii(resultat.resume), "le resume part vers la console"
 
 
 def test_une_sortie_npm_sans_json_ne_dit_rien_des_failles():
@@ -283,7 +283,7 @@ def test_osv_presente_ses_failles_de_la_plus_grave_a_la_moins_grave():
     assert resultat.detail.index("RUSTSEC-2019-0009") < resultat.detail.index("RUSTSEC-2018-0018")
     assert "| 0.6.10 |" in resultat.detail, "la version qui corrige doit etre donnee"
     assert "https://osv.dev/vulnerability/RUSTSEC-2019-0009" in resultat.detail
-    assert not _hors_cp1252(resultat.resume)
+    assert not _hors_ascii(resultat.resume)
 
 
 def test_osv_sans_reseau_n_affiche_pas_zero_faille():

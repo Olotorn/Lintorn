@@ -126,7 +126,7 @@ def _audit(tmp_path, monkeypatch, commandes):
     monkeypatch.setattr(config, "ETAT", tmp_path / ".lintorn" / "etat.json")
     monkeypatch.setattr(config, "COMMANDES", commandes)
     monkeypatch.setattr(config, "CONTROLES_INTERNES", {"audit_complet": True})
-    monkeypatch.setattr(lintorn.rapport.markdown, "ecrire_rapport", lambda resultats: True)
+    monkeypatch.setattr(lintorn.rapport.markdown, "ecrire_rapport", lambda resultats, hook=False: True)
     monkeypatch.setattr("sys.argv", ["lintorn"])
 
     def lancer_une_fois(capsys):
@@ -186,7 +186,7 @@ def _pousser(tmp_path, monkeypatch, capsys, *fichiers):
     monkeypatch.setattr(config, "SOMMET_GIT", None)
     monkeypatch.setattr(config, "COMMANDES", [faux_ruff])
     monkeypatch.setattr(config, "CONTROLES_INTERNES", {})
-    monkeypatch.setattr(lintorn.rapport.markdown, "ecrire_rapport", lambda resultats: True)
+    monkeypatch.setattr(lintorn.rapport.markdown, "ecrire_rapport", lambda resultats, hook=False: True)
     monkeypatch.setattr("sys.argv", ["lintorn", "--rapide", "--fichiers", *fichiers])
     cli.main()
     return next(ligne for ligne in capsys.readouterr().out.splitlines()
@@ -224,7 +224,7 @@ def _conclusion(tmp_path, monkeypatch, capsys, commandes, internes=None, rapide=
     monkeypatch.setattr(config, "CONTROLES_INTERNES", dict.fromkeys(internes or {}, True))
     for nom, controle in (internes or {}).items():
         monkeypatch.setitem(noyau.CONTROLES_INTERNES, nom, controle)
-    monkeypatch.setattr(lintorn.rapport.markdown, "ecrire_rapport", lambda resultats: True)
+    monkeypatch.setattr(lintorn.rapport.markdown, "ecrire_rapport", lambda resultats, hook=False: True)
     monkeypatch.setattr("sys.argv", ["lintorn", *(["--rapide"] if rapide else [])])
     cli.main()
     return capsys.readouterr().out

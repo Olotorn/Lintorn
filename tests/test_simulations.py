@@ -325,6 +325,25 @@ def test_h11_un_pip_muet_ne_fait_pas_planter_maj_securite(tmp_path, monkeypatch,
     assert "ECHEC requests" in capsys.readouterr().out
 
 
+def test_h11b_une_faille_citee_deux_fois_ne_s_affiche_qu_une_fois(tmp_path, monkeypatch, capsys):
+    """pip-audit peut lister deux fois la même faille : « PYSEC-1, PYSEC-1 »."""
+    faille = {"id": "PYSEC-1", "aliases": ["CVE-1"], "fix_versions": ["2.20.0"]}
+    rapport = json.dumps({"dependencies": [{"name": "requests", "version": "2.5.0",
+                                            "vulns": [faille, faille]}]})
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *_, **__: subprocess.CompletedProcess([], 1, rapport, ""))
+    monkeypatch.setattr(config, "BACKEND", None)
+    monkeypatch.setattr(config, "PY_RACINE", tmp_path)
+    monkeypatch.setattr(config, "VENV_PROJET", tmp_path / ".venv")
+
+    lintorn.commandes.securite.maj_securite(appliquer=False)
+    rapporte = lintorn.outils.pip_audit.traduire(
+        Resultat("Failles connues (pip-audit)", "ALERTE", "x", rapport, code_sortie=1))
+
+    assert capsys.readouterr().out.count("PYSEC-1") == 1
+    assert rapporte.detail.count("PYSEC-1") == 1
+
+
 def test_h12_le_repinglage_garde_les_commentaires_et_les_noms_souples(tmp_path, monkeypatch):
     """`requests==2.5.0  # client HTTP` n'était pas repinglé, mais annoncé."""
     monkeypatch.setattr(config, "RACINE", tmp_path)
@@ -338,6 +357,114 @@ def test_h12_le_repinglage_garde_les_commentaires_et_les_noms_souples(tmp_path, 
     assert changes == 2
     assert fichier.read_text(encoding="utf-8") == (
         "requests==2.20.0  # client HTTP\ntyping_extensions==4.12.0\n")
+
+
+def _appliquer_sur(tmp_path, monkeypatch, sans_ligne: dict):
+    """`lintorn pip-audit --appliquer` : certifi vulnérable, son installation réussit."""
+    rapport = json.dumps({"dependencies": [{"name": "certifi", "version": "2026.7.22",
+                                            "vulns": [{"id": "X", "fix_versions": ["2026.10.19"]}]}]})
+    def lancer(cmd, *_, **__):
+        texte = " ".join(map(str, cmd))
+        if "pip_audit" in texte:
+            return subprocess.CompletedProcess(cmd, 1, rapport, "")
+        if "--sans-ligne" in texte:
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(sans_ligne), "")
+        return subprocess.CompletedProcess(cmd, 0 if "install" in texte else 1, "", "")
+    monkeypatch.setattr(subprocess, "run", lancer)
+    monkeypatch.setattr(config, "BACKEND", None)
+    monkeypatch.setattr(config, "PY_RACINE", tmp_path)
+    monkeypatch.setattr(config, "VENV_PROJET", tmp_path / ".venv")
+    monkeypatch.setattr(config, "RACINE", tmp_path)
+    monkeypatch.setattr(config, "PYTHON", str(tmp_path / ".venv" / "bin" / "python"))
+    monkeypatch.setattr(config, "REQUIREMENTS", None)
+    return lintorn.commandes.securite.maj_securite(appliquer=True)
+
+
+def test_h12b_un_paquet_des_outils_d_audit_ne_s_epingle_pas(tmp_path, monkeypatch, capsys):
+    """certifi, tiré par pip-audit, sans requirements.txt : « [Errno 2] No such file
+    or directory: '/home/<nom>/...' », « a faire manuellement », et le code 1."""
+    code = _appliquer_sur(tmp_path, monkeypatch, {"certifi": "outil", "requests": "outil"})
+
+    sortie = capsys.readouterr().out
+    assert code == 0, sortie
+    assert "certifi : apporte par les outils d'audit" in sortie
+    assert "Errno" not in sortie and str(tmp_path) not in sortie, "ni erreur, ni chemin de la machine"
+
+
+def test_h12c_sans_requirements_un_paquet_du_projet_reste_a_epingler(tmp_path, monkeypatch, capsys):
+    code = _appliquer_sur(tmp_path, monkeypatch, {})
+
+    sortie = capsys.readouterr().out
+    assert code == 1, "il reste quelque chose a faire"
+    assert "Pas de requirements.txt : epingle toi-meme certifi==2026.10.19" in sortie
+    assert "Errno" not in sortie
+
+
+def test_h12d_une_ligne_du_projet_se_repingle_meme_tiree_par_l_outillage(tmp_path, monkeypatch, capsys):
+    """Déclaré par le projet, certifi est À LUI : on repingle sa ligne."""
+    fichier = tmp_path / "requirements.txt"
+    fichier.write_text("certifi==2026.7.22\n", encoding="utf-8")
+    monkeypatch.setattr(config, "RACINE", tmp_path)
+
+    changes = lintorn.commandes.securite._repingler(fichier, [("certifi", "2026.10.19")],
+                                                    {"certifi": "outil"})
+
+    assert changes == 1
+    assert fichier.read_text(encoding="utf-8") == "certifi==2026.10.19\n"
+    assert "rien a epingler" not in capsys.readouterr().out
+
+
+def test_h12f_rien_a_epingler_ne_s_annonce_pas_comme_un_repinglage(tmp_path, monkeypatch, capsys):
+    """« requirements.txt repingle sur 0 paquet(s) sur 0 » sous le seul paquet des outils."""
+    (tmp_path / "requirements.txt").write_text("six==1.17.0\n", encoding="utf-8")
+    monkeypatch.setattr(config, "RACINE", tmp_path)
+
+    regles = lintorn.commandes.securite._repingler(
+        tmp_path / "requirements.txt", [("certifi", "2026.10.19")], {"certifi": "outil"})
+
+    assert regles == 1
+    assert "repingle sur" not in capsys.readouterr().out
+
+
+def test_h12g_un_requirements_en_utf16_le_dit_en_clair(tmp_path, monkeypatch, capsys):
+    fichier = tmp_path / "requirements.txt"
+    fichier.write_text("certifi==2024.2.2\n", encoding="utf-16")
+    monkeypatch.setattr(config, "RACINE", tmp_path)
+
+    lintorn.commandes.securite._repingler(fichier, [("certifi", "2026.10.19")])
+
+    sortie = capsys.readouterr().out
+    assert "il n'est pas en UTF-8" in sortie and "codec" not in sortie
+
+
+def test_h12e_dependances_dit_pourquoi_chaque_paquet_sans_ligne_est_la(tmp_path):
+    """Le vrai script, avec le python des tests : pytest y est, et il tire pluggy."""
+    script = Path(lintorn.__file__).parent / "dependances.py"
+    lancer = [sys.executable, str(script), str(tmp_path), "--sans-ligne"]
+
+    seul = json.loads(subprocess.run(lancer, capture_output=True, text=True, timeout=120,
+                                     check=True).stdout)
+    (tmp_path / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    declare = json.loads(subprocess.run(lancer, capture_output=True, text=True, timeout=120,
+                                        check=True).stdout)
+
+    assert seul["pytest"] == seul["pluggy"] == "outil", seul
+    assert "pytest" not in declare and declare["pluggy"] == "tire", "pytest declare : pluggy est au projet"
+
+
+def test_h12h_une_sous_dependance_d_un_paquet_declare_ne_s_epingle_pas(tmp_path, monkeypatch, capsys):
+    """`requests>=2.31` déclaré, certifi monté : « a epingler a la main », alors que pip
+    installera ailleurs la version corrigée."""
+    fichier = tmp_path / "requirements.txt"
+    fichier.write_text("requests>=2.31\n", encoding="utf-8")
+    monkeypatch.setattr(config, "RACINE", tmp_path)
+
+    regles = lintorn.commandes.securite._repingler(fichier, [("certifi", "2026.10.19")],
+                                                   {"certifi": "tire"})
+
+    assert regles == 1
+    assert "certifi : tire par une dependance que tu declares" in capsys.readouterr().out
+    assert fichier.read_text(encoding="utf-8") == "requests>=2.31\n"
 
 
 def test_m1_un_titre_d_avis_ne_fabrique_pas_de_fausse_section():

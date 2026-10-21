@@ -4,10 +4,29 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 from .. import config
 from ..base import Resultat
+from ..controles.outillage import configuration
+
+TITRE ="Defauts dans les fichiers pousses"
+TITRE_ECART = "Ce qui part vs ce qui est lu"
+TITRE_LISTE = "Ce qui part"
+TITRE_RIEN = "Ce que ce push envoie"
+
+
+def rien_ne_part() -> Resultat:
+    """Le hook a dit ce qui part, et rien de nouveau ne part de ce projet : rien à juger."""
+    return Resultat(
+        TITRE_RIEN, "INDISPONIBLE",
+        "rien de nouveau ne part de ce projet - rien a verifier",
+        "Ce push n'envoie aucun fichier nouveau de ce projet : une branche supprimée, des "
+        "commits déjà sur le distant poussés sous un autre nom, ou un push qui ne touche "
+        "qu'un autre sous-projet. Lintorn n'a rien à juger, il laisse partir.",
+        bloquant=False, detail_markdown=True, detail_meme_au_vert=True,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -46,6 +65,21 @@ _SUFFIXES_LUS = {
 _OUTILS_LIVRES = {"ruff", "dependances", "tests", "code_mort", "failles", "django_check",
                   "migrations", "donnees_metier", "deploy", "typescript",
                   "failles_npm", "failles_osv"}
+# Les réglages que ruff lit avant tout : un TOML cassé le fait échouer.
+_NOMS_LUS = {"ruff": ("pyproject.toml", "ruff.toml", ".ruff.toml")}
+
+
+def _fichiers_de_lintorn() -> set[Path]:
+    """Ce que « Configuration (Lintorn) » a lu et validé, et le `.gitignore` que Lintorn écrit.
+
+    Pousser une règle ajoutée faisait dire « aucun controle ne lit ces
+    fichiers » sur `regles.toml`, que Lintorn venait de lire, et le push
+    finissait « SANS verification complete ».
+    """
+    lus = {fichier for fichier in (config.RACINE / "pyproject.toml",
+                                   config.DOSSIER_LINTORN / "config.toml", config.FICHIER_REGLES)
+           if fichier.name in config.FICHIERS_CONFIG_LUS}
+    return lus | {config.DOSSIER_LINTORN / ".gitignore"}
 
 
 def _sous(fichier: str, dossier: Path) -> bool:
@@ -65,23 +99,29 @@ def _lus_par_un_controle(resultats: list[Resultat], fichiers: list[str]) -> set[
     """
     ont_tourne = {r.titre for r in resultats if r.statut in ("OK", "ALERTE", "VERIF")}
     lus: set[str] = set()
+    exacts: set[Path] = set()
     for entree in config.COMMANDES:
         if entree["titre"] not in ont_tourne:
             continue
         if entree["cle"] in _OUTILS_LIVRES:
             suffixes = _SUFFIXES_LUS.get(entree["cle"], ())
+            noms = _NOMS_LUS.get(entree["cle"], ())
             lus |= {f for f in fichiers
-                    if Path(f).suffix in suffixes and _sous(f, entree["cwd"])}
+                    if (Path(f).suffix in suffixes or Path(f).name in noms)
+                    and _sous(f, entree["cwd"])}
+            if entree["cle"] == "dependances" and config.REQUIREMENTS is not None:
+                exacts.add(config.REQUIREMENTS)
         else:
             lus |= {f for f in fichiers if _sous(f, entree["cwd"])}
 
-    docs = set()
+    if configuration.TITRE in ont_tourne:
+        exacts |= _fichiers_de_lintorn()
     if "Doc vs code" in ont_tourne:
-        docs |= set(config.DOCS_A_VERIFIER)
+        exacts |= {Path(doc) for doc in config.DOCS_A_VERIFIER}
     if ont_tourne & {"Memoire IA vs code", "Regles enoncees vs controlees"}:
-        docs |= set(config.DOCS_IA)
+        exacts |= {Path(doc) for doc in config.DOCS_IA}
     relatifs = set()
-    for doc in docs:
+    for doc in exacts:
         try:
             relatifs.add(Path(doc).resolve().relative_to(config.RACINE.resolve()).as_posix())
         except (ValueError, OSError):
@@ -166,8 +206,8 @@ def focus_sur(resultats: list[Resultat], fichiers: list[str]) -> Resultat:
                 if resultat.statut != "VERIF" or not gravite:
                     gravite = resultat.statut
 
-    titre = "Defauts dans les fichiers pousses"
-    apercu = ", ".join(non_lus[:3]) + (" ..." if len(non_lus) > 3 else "")
+    titre = TITRE
+    apercu = _apercu(non_lus)
     jamais_lus = ("\n\nAucun contrôle de Lintorn ne lit ces fichiers : l'absence de "
                   "défaut n'y prouve rien.\n" + "\n".join(f"- {f}" for f in non_lus)
                   if non_lus else "")
@@ -200,3 +240,161 @@ def focus_sur(resultats: list[Resultat], fichiers: list[str]) -> Resultat:
         "\n".join(f"- {t}" for t in touches) + jamais_lus,
         bloquant=False,   # informatif : le blocage reste décidé par les contrôles eux-mêmes
     )
+
+
+def _apercu(fichiers: list[str]) -> str:
+    return ", ".join(fichiers[:3]) + (" ..." if len(fichiers) > 3 else "")
+
+
+def _differe_du_disque(commit: str) -> set[str] | None:
+    """Les fichiers du projet que `commit` n'a pas tels que le disque les a. None : git a échoué.
+
+    `--relative` et `-- .` parlent comme le hook, depuis le projet. `^{commit}` :
+    un tag annoté y mène. `core.fileMode=false` : un `chmod +x` pas encore
+    commité ne change rien à ce que les contrôles lisent, et suffisait à
+    annoncer un écart.
+    """
+    try:
+        sortie = config.git("-c", "core.fileMode=false", "diff", "--name-only", "-z", "--relative",
+                            f"{commit}^{{commit}}", "--", ".", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return set(sortie.stdout.split("\0")) - {""} if sortie.returncode == 0 else None
+
+
+def _caches_a_git() -> set[str] | None:
+    """Les fichiers du projet que git ne compare plus au disque. None : git a échoué.
+
+    `assume-unchanged` (lettre minuscule dans `git ls-files -v`) et `skip-worktree`
+    (`S`, que pose aussi un sparse-checkout) : `git diff` les dit inchangés quoi
+    qu'il y ait sur le disque, et une faute commitée mais corrigée, ou absente,
+    du disque partait sur « Lintorn OK ».
+    """
+    try:
+        sortie = config.git("ls-files", "-v", "-z", "--", ".", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if sortie.returncode != 0:
+        return None
+    return {entree[2:] for entree in sortie.stdout.split("\0")
+            if len(entree) > 2 and (entree[0].islower() or entree[0] == "S")}
+
+
+def _differe_en_vrai(commit: str, fichier: str) -> bool:
+    """Ce fichier du disque est-il autre que dans `commit` ? Comparé par git lui-même
+    (`hash-object` applique les mêmes filtres que l'index), sans son drapeau."""
+    try:
+        attendu = config.git("rev-parse", "--verify", "-q", f"{commit}^{{commit}}:./{fichier}",
+                             timeout=30)
+        if attendu.returncode != 0:
+            return False      # absent du commit : ce commit ne l'envoie pas
+        if not (config.RACINE / fichier).is_file():
+            return True
+        disque = config.git("hash-object", "--", fichier, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return disque.returncode != 0 or disque.stdout.strip() != attendu.stdout.strip()
+
+
+def _envoyes_par(commit: str, distant: str | None) -> set[str] | None:
+    """Les fichiers que touchent les commits menant à `commit` que le distant n'a pas encore.
+
+    Le calcul du hook pour une branche neuve, fait pour CE commit seul : un tag
+    posé avant les derniers commits n'envoie pas leurs fichiers. Comparé à tous
+    les fichiers du push, il les disait « pas sur ton disque tels qu'ils
+    partent ».
+    """
+    distants = f"--remotes={distant}" if distant else "--remotes"
+    try:
+        sortie = config.git("log", "--format=", "--name-only", "-z", "--cc", "--relative", commit,
+                            "--not", distants, "--", ".", timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return set(sortie.stdout.split("\0")) - {""} if sortie.returncode == 0 else None
+
+
+def ecart_avec_le_disque(fichiers: list[str], commits: list[str], liste: str | None,
+                         distant: str | None) -> list[Resultat]:
+    """Ce que ce push envoie et que Lintorn n'a pas lu : les fichiers qui diffèrent du disque,
+    et ce que le hook n'a pas su lister.
+
+    ⚠️ Les contrôles lisent le DISQUE, git envoie des COMMITS. Une correction
+    pas encore commitée, une autre branche que celle où l'on est, un tag :
+    Lintorn jugeait un fichier, git en envoyait un autre, et le hook concluait
+    « Lintorn OK » sur un code fautif parti au distant. Juger le contenu des
+    commits eux-mêmes reste à faire ; d'ici là, l'écart se DIT.
+
+    `liste` vient du hook : `complete`, `echec` (git n'a pas tout listé), `rien`
+    (l'outil qui l'appelle ne lui a rien transmis), None (une copie du hook
+    d'avant cette variable). Sans liste complète, il n'y a rien à quoi comparer :
+    le hook concluait « Lintorn OK » sans avoir comparé.
+    """
+    if liste is None:
+        return [_liste_inconnue(
+            "ton hook ne dit pas a Lintorn ce qui part : relance `lintorn hook`",
+            "Ta copie du hook vient d'une version précédente de Lintorn. Elle ne lui transmet "
+            "pas ce que le push envoie : Lintorn ne peut pas comparer ce qui part à ce qu'il a "
+            "lu sur ton disque.\n\nPour la mettre à jour : `lintorn hook`.")]
+    if liste == "rien":
+        return [_liste_inconnue(
+            "l'outil qui appelle Lintorn ne lui a pas transmis ce qui part",
+            "Ton outil de hooks garde pour lui la liste que git donne à un pre-push : "
+            "Lintorn ne sait pas ce que ce push envoie, et ne peut pas le comparer à ce "
+            "qu'il a lu sur ton disque.\n\nAvec lefthook, la commande de Lintorn doit "
+            "avoir `use_stdin: true` (voir `lintorn hook`).")]
+
+    complete = liste == "complete"
+    pousses = {fichier.replace("\\", "/") for fichier in fichiers}
+    commits = [commit for commit in dict.fromkeys(commits) if commit.strip("0")]
+    if complete and not pousses:
+        commits = []          # aucun fichier ne part : rien à comparer
+    differents: set[str] = set()
+    caches = _caches_a_git() if commits else set()
+    for commit in commits:
+        autres = _differe_du_disque(commit)
+        if autres is not None and caches is not None:
+            # Seuls ceux qui partent : un sparse-checkout en cache des milliers.
+            suspects = caches & (pousses if complete else (_envoyes_par(commit, distant) or set()))
+            autres |= {fichier for fichier in suspects if _differe_en_vrai(commit, fichier)}
+        if autres is None or caches is None:
+            return [Resultat(TITRE_ECART, "VERIF",
+                             "impossible de comparer ce que tu pousses a ton disque",
+                             "git n'a pas su comparer un commit poussé à ton disque : ce que "
+                             "Lintorn a lu n'est peut-être pas ce qui part.", bloquant=False)]
+        if complete:
+            autres &= pousses
+        # Plusieurs commits (une branche et un tag, deux branches) : chacun
+        # n'envoie que ses propres fichiers. Sans liste, ils la remplacent.
+        if autres and (len(commits) > 1 or not complete):
+            envoyes = _envoyes_par(commit, distant)
+            if envoyes is not None:
+                autres &= envoyes
+        differents |= autres
+
+    resultats = []
+    if not complete:
+        resultats.append(_liste_inconnue(
+            "git n'a pas su lister tous les fichiers qui partent",
+            "Le hook n'a pas pu lister une partie des fichiers de ce push : le focus ne "
+            "les couvre pas, et rien ne dit qu'un contrôle sait les lire."))
+    if differents:
+        ecarts = sorted(differents)
+        resultats.append(Resultat(
+            TITRE_ECART, "VERIF",
+            f"{len(ecarts)} fichier(s) pousse(s) ne sont pas sur ton disque tels qu'ils partent : "
+            f"{_apercu(ecarts)}",
+            "Lintorn lit les fichiers de ton disque. Ceux-ci n'y sont pas ce que le push envoie : "
+            "des modifications pas encore commitées, le push d'une autre branche (ou d'un "
+            "tag) que celle où tu es, ou un fichier que git ne compare plus au disque "
+            "(`assume-unchanged`, `skip-worktree`, sparse-checkout). Ce que Lintorn a jugé "
+            "n'est donc pas ce qui part :\n\n"
+            + "\n".join(f"- {fichier}" for fichier in ecarts)
+            + "\n\nPour qu'il vérifie exactement ce qui part : commite tes modifications (ou "
+            "mets-les de côté, `git stash`), ou pousse depuis la branche concernée.",
+            bloquant=False, detail_markdown=True,
+        ))
+    return resultats
+
+
+def _liste_inconnue(resume: str, detail: str) -> Resultat:
+    return Resultat(TITRE_LISTE, "VERIF", resume, detail, bloquant=False, detail_markdown=True)

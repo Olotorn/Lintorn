@@ -31,6 +31,8 @@ def _documents_du_depot(ecartes: dict[str, list[str]] | None = None) -> list[Pat
     Ce qui vit sous un dossier de IGNORES sans être suivi (`node_modules`
     installé) n'appartient pas au dépôt : on ne le compte pas.
     """
+    if config.PARCOURS_COUPE:
+        return []       # trois `rglob` sur tout le dossier personnel : l'audit n'aura pas lieu
     trouves = []
     mis_de_cote: dict[Path, str] = {}
     candidats = (fichier for motif in config.FORMATS_DOC for fichier in config.RACINE.rglob(motif))
@@ -123,11 +125,20 @@ def _instructions_ia() -> list[Path]:
     siennes.
     """
     trouves = []
+    racine = str(config.RACINE).rstrip("/\\")
     for fichier in config._FICHIERS:
-        if config.sous_ignores(fichier) or not fichier.is_file():
+        # Le nom d'abord, en texte : `relative_to` et `is_file` sur chaque
+        # fichier coûtaient 16 s hors dépôt, depuis `/usr`, avant toute commande.
+        relatif = str(fichier)[len(racine) + 1:].replace("\\", "/")
+        if not config._est_un_fichier_ia(relatif) or config.sous_ignores(fichier):
             continue
-        if config._est_un_fichier_ia(fichier.relative_to(config.RACINE).as_posix()):
-            trouves.append(fichier)
+        # Avant Python 3.14, `is_file()` LÈVE sur un refus de droits
+        # (`/proc/1/map_files` depuis `/`) au lieu de répondre non.
+        try:
+            if fichier.is_file():
+                trouves.append(fichier)
+        except OSError:
+            continue
     return sorted(trouves)
 
 

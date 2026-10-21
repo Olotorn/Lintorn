@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from .. import __version__
 
-AIDE = """lintorn — audite le code d'un projet ET la memoire que lit l'assistant IA.
+AIDE = """lintorn : audite le code d'un projet ET la memoire que lit l'assistant IA.
 
 USAGE
     lintorn                      audit complet
@@ -17,7 +17,8 @@ MISE EN PLACE
     lintorn init                 genere .lintorn/config.toml pour ce projet
     lintorn regles               prepare un [[regles]] par regle de ta doc
                                  qui n'a pas encore de controle
-    lintorn hook                 installe le hook pre-push
+    lintorn hook                 installe le hook pre-push (sans faire taire
+                                 les hooks que le projet a deja)
     lintorn confiance            autorise Lintorn a lancer ses outils dans ce
                                  projet (il le demande de lui-meme, une fois)
     lintorn outils               regarde ce que contient le projet, installe
@@ -114,10 +115,14 @@ GUIDE = """
    .lintorn/config.toml   les reglages. Ecrits une fois, peu de retouches.
    .lintorn/regles.toml   tes regles maison. Ca vit, ca grossit.
 
+   Et ce que Lintorn ecrit, a ne pas toucher :
+   .lintorn/rapport.md        ton dernier lancement (lintorn, lintorn rapide...)
+   .lintorn/rapport-push.md   ton dernier push : il reste la jusqu'au suivant
+
 
 5. TES REGLES MAISON
 
-   « Jamais de couleur en dur dans un CSS » n'est ecrit nulle part dans
+   "Jamais de couleur en dur dans un CSS" n'est ecrit nulle part dans
    le code : c'est une DECISION. Lintorn ne peut pas la deviner, mais il
    sait la lire dans ton CLAUDE.md et te dire lesquelles ne sont
    controlees par rien :

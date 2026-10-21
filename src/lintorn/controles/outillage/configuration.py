@@ -6,6 +6,8 @@ from __future__ import annotations
 from ... import config
 from ...base import Resultat
 
+TITRE = "Configuration (Lintorn)"
+
 
 def controle_configuration() -> Resultat:
     """Ce que Lintorn n'a pas réussi à charger, et qu'il taisait.
@@ -20,7 +22,7 @@ def controle_configuration() -> Resultat:
     pas le code du projet. `_signaler_non_bloquants()` le nomme dans le
     verdict, il ne se tait pas pour autant.
     """
-    titre = "Configuration (Lintorn)"
+    titre = TITRE
 
     if config.SOUCIS_CONFIG:
         return Resultat(
