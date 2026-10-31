@@ -11,11 +11,12 @@ Ce fichier ne contient AUCUN controle. Il assemble ce que declare
 
 from __future__ import annotations
 
+import datetime
 from collections.abc import Callable
 from pathlib import Path
 
 from . import confiance, config, outils
-from .base import Resultat, lancer
+from .base import Resultat, lancer, lire_etat
 from .controles.outillage import audit_complet, configuration, hook_git, python_projet
 from .controles.projet import (
     doc_vs_code,
@@ -43,6 +44,15 @@ CONTROLES_INTERNES = {
 # ─────────────────────────────────────────────────────────────────────────────
 # ORCHESTRATION
 # ─────────────────────────────────────────────────────────────────────────────
+# Le début de la ligne d'un outil lent que `--rapide` saute : le verdict le
+# reconnaît, pour ne pas le compter parmi les outils muets.
+NON_EXECUTE_RAPIDE = "NON EXECUTE (mode --rapide)"
+
+# La clé de `etat.json` où l'audit complet note ce que ses outils lents ont
+# trouvé : {"date": ..., "alertes": {titre: résumé}}.
+ALERTES_AUDIT_COMPLET = "alertes_audit_complet"
+
+
 def _sans_le_python_du_projet(entree: dict) -> bool:
     """Cette commande tournerait-elle avec un python qui n'est pas celui du projet ?
 
@@ -68,15 +78,44 @@ def _executable_commite(entree: dict) -> bool:
     return executable.is_absolute() and config.suivi_par_git(executable)
 
 
+def _au_dernier_audit_complet(titre: str) -> str | None:
+    """Ce que cet outil lent avait trouvé au dernier audit complet. None : rien, ou on ne sait pas."""
+    memoire = lire_etat().get(ALERTES_AUDIT_COMPLET)
+    if not isinstance(memoire, dict) or not isinstance(memoire.get("alertes"), dict):
+        return None
+    trouve = memoire["alertes"].get(titre)
+    try:
+        jours = (datetime.date.today()
+                 - datetime.date.fromisoformat(str(memoire.get("date"))[:10])).days
+    except ValueError:
+        return None
+    if not isinstance(trouve, str) or jours < 0:
+        return None
+    return f"au dernier audit complet (il y a {jours} jour(s)) : {trouve}"
+
+
 def refus_sans_lancer(entree: dict, rapide: bool) -> Resultat | None:
     """Pourquoi cette commande ne partira PAS, quoi que réponde l'utilisateur. None = elle peut."""
     if rapide and entree["lent"]:
         # ⚠️ On NE saute PAS en silence : un contrôle absent du rapport
         # laisserait croire qu'il a tourné. C'est grave pour pip-audit
         # (failles de sécurité) — on préfère une ligne explicite.
+        # Et ce qu'il avait trouvé au dernier audit complet est redit : sans
+        # lui, six failles connues tenaient dans « NON EXECUTE », sous un
+        # « Audit complet » au vert. La ligne reste INDISPONIBLE : l'outil
+        # n'a pas tourné, rien ne doit le compter comme une vérification.
+        trouve = _au_dernier_audit_complet(entree["titre"])
+        if trouve:
+            return Resultat(
+                entree["titre"], "INDISPONIBLE", f"{NON_EXECUTE_RAPIDE} - {trouve}",
+                "Ce résultat est celui du **dernier audit complet** : le mode rapide, "
+                "et donc le hook, ne relance pas cet outil. Pour savoir où il en est "
+                "aujourd'hui :\n\n```bash\nlintorn\n```",
+                bloquant=False, detail_markdown=True, rappel=True,
+            )
         return Resultat(
             entree["titre"], "INDISPONIBLE",
-            "NON EXECUTE (mode --rapide) - relancer sans --rapide",
+            f"{NON_EXECUTE_RAPIDE} - relancer sans --rapide",
             bloquant=False,
         )
     if _sans_le_python_du_projet(entree):

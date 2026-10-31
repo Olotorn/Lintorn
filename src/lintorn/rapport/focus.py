@@ -136,6 +136,19 @@ def _lus_par_un_controle(resultats: list[Resultat], fichiers: list[str]) -> set[
     return lus
 
 
+def _sous_module(fichier: str) -> bool:
+    """git ne suit que des fichiers : un chemin poussé qui est un dossier est un sous-module.
+
+    Depuis la racine du projet seulement : le hook y prend ses chemins, et un
+    dossier homonyme au sommet du dépôt ferait passer un vrai fichier pour un
+    sous-module, que plus rien ne lirait.
+    """
+    try:
+        return (config.RACINE / fichier).is_dir()
+    except OSError:
+        return False
+
+
 def _existe(fichier: str) -> bool:
     """Un fichier SUPPRIMÉ par le push n'a plus de défaut à avoir."""
     return any((base / fichier).exists()
@@ -151,6 +164,18 @@ def focus_sur(resultats: list[Resultat], fichiers: list[str]) -> Resultat:
     traîne depuis six mois.
     """
     fichiers = [fichier.replace("\\", "/") for fichier in fichiers]
+    # Un sous-module n'est pas un fichier du projet : le push n'envoie que sa
+    # version, son code part dans son propre dépôt, que son propre hook lit.
+    # Compté parmi les non-lus, sa simple montée de version finissait « SANS
+    # verification complete », à chaque fois.
+    sous_modules = [fichier for fichier in fichiers if _sous_module(fichier)]
+    if sous_modules and len(sous_modules) == len(fichiers):
+        return Resultat(
+            TITRE, "OK",
+            f"seulement la version de {len(sous_modules)} sous-module(s) : "
+            f"{_apercu(sous_modules)} - leur code se verifie dans leur propre depot",
+            bloquant=False)
+    fichiers = [fichier for fichier in fichiers if fichier not in sous_modules]
     lus = _lus_par_un_controle(resultats, fichiers)
     non_lus = [fichier for fichier in fichiers if fichier not in lus and _existe(fichier)]
     formes = [forme for fichier in fichiers for forme in _alias(fichier)]
@@ -212,6 +237,16 @@ def focus_sur(resultats: list[Resultat], fichiers: list[str]) -> Resultat:
                   "défaut n'y prouve rien.\n" + "\n".join(f"- {f}" for f in non_lus)
                   if non_lus else "")
 
+    # Aucun fichier poussé n'est lu : la lacune, même si un contrôle en CITE un.
+    # Le conseil du hook nomme `lefthook.yml` : poussé seul, il passait pour
+    # « un point a verifier », et le push finissait sur « Lintorn OK ».
+    if non_lus and len(non_lus) == len(fichiers):
+        cites = ("\n\nCités par un contrôle, sans avoir été lus :\n"
+                 + "\n".join(f"- {t}" for t in touches) if touches else "")
+        return Resultat(titre, "INDISPONIBLE",
+                        f"aucun controle ne lit ces fichiers : {apercu}",
+                        (jamais_lus + cites).strip(), bloquant=False)
+
     if not touches:
         if not non_lus:
             return Resultat(
@@ -219,10 +254,6 @@ def focus_sur(resultats: list[Resultat], fichiers: list[str]) -> Resultat:
                 f"{len(fichiers)} fichier(s) pousse(s), aucun defaut connu dedans",
                 bloquant=False,
             )
-        if len(non_lus) == len(fichiers):
-            return Resultat(titre, "INDISPONIBLE",
-                            f"aucun controle ne lit ces fichiers : {apercu}",
-                            jamais_lus.strip(), bloquant=False)
         return Resultat(
             titre, "VERIF",
             f"aucun defaut connu dans {len(fichiers) - len(non_lus)} fichier(s),"

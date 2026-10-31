@@ -21,7 +21,7 @@ def accorder(sans_demander: bool = False) -> int:
     manquants = confiance.nouveaux(a_lancer)
     if not manquants:
         print("Tout ce que Lintorn lance dans ce projet est deja accorde.")
-        print(f"(Notes dans {confiance.fichier()} - supprimer la ligne du projet pour retirer l'accord.)")
+        print(f"(Notes dans {confiance.fichier()} - `lintorn confiance --rm` pour retirer l'accord.)")
         return 0
     if not sans_demander:
         if not confiance.terminal():
@@ -36,4 +36,18 @@ def accorder(sans_demander: bool = False) -> int:
         print(f"L'accord n'a PAS pu etre note : {souci}")
         return 1
     print(f"Accorde : {len(manquants)} commande(s), pour ce projet seulement.")
+    return 0
+
+
+def retirer() -> int:
+    """`lintorn confiance --rm` : retire l'accord donné à CE projet, et à lui seul."""
+    combien, souci = confiance.retirer()
+    if souci:
+        print(f"L'accord n'a PAS pu etre retire : {souci}")
+        return 1
+    if not combien:
+        print("Rien a retirer : ce projet n'a recu aucun accord.")
+        return 0
+    print(f"Accord retire : {combien} commande(s), pour ce projet seulement.")
+    print("Lintorn te redemandera avant de lancer quoi que ce soit ici.")
     return 0

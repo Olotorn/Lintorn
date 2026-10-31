@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from ... import config
 from ...base import Resultat, lien
@@ -123,25 +124,92 @@ def regles_enoncees() -> list[tuple[str, int, str, list[str]]]:
     return trouvees
 
 
+_RX_NUMERO = re.compile(r"^(.+):(\d+)$")
+
+
+def _mots(texte: str) -> str:
+    """Les mots d'un texte, en minuscules, sans balisage ni ponctuation.
+
+    `**Zéro dépendance** |` et « zéro dépendance » donnent les mêmes mots :
+    une ancre se compare au texte, pas à sa mise en forme. Recomposé (NFC)
+    d'abord : un « é » écrit e + accent (ce que produit macOS) coupait le
+    mot en deux, et l'ancre ne désignait plus rien.
+    """
+    return " ".join(re.findall(r"[^\W_]+", unicodedata.normalize("NFC", texte).casefold()))
+
+
+def ligne_designee(source: str, enoncees) -> tuple[str | None, str]:
+    """(« doc:ligne » de la règle énoncée que vise `source`, pourquoi sinon).
+
+    Deux écritures. `CLAUDE.md#Zéro dépendance` vise la règle de CLAUDE.md
+    dont la phrase contient ces mots : écrire au-dessus ne la décale pas, et
+    elle ne casse que si la règle elle-même change, quand il faut la relire.
+    `CLAUDE.md:38` vise une ligne, et se périme dès qu'on ajoute une ligne
+    plus haut.
+
+    Un texte trouvé dans plusieurs règles ne désigne rien : en choisir une
+    reviendrait à la déclarer couverte sur un pari.
+    """
+    if "#" in source:
+        doc, texte = source.split("#", 1)
+        cherche = f" {_mots(texte)} "
+        trouvees = [f"{chemin}:{numero}" for chemin, numero, phrase, _ in enoncees
+                    if chemin == doc and cherche.strip() and cherche in f" {_mots(phrase)} "]
+        if len(trouvees) == 1:
+            return trouvees[0], ""
+        if trouvees:
+            return None, (f"ce texte est dans {len(trouvees)} regles de {doc} : "
+                          "allonge-le pour n'en designer qu'une")
+        return None, (f"aucune regle de {doc} ne contient ce texte : "
+                      "la regle a change, ou la `source` est fausse")
+
+    if _RX_NUMERO.match(source) and source in {f"{c}:{n}" for c, n, _, _ in enoncees}:
+        return source, ""
+    doc = _RX_NUMERO.sub(r"\1", source)
+    return None, ("cette ligne n'enonce aucune regle : la doc a bouge, ou la `source` est "
+                  f'fausse. Le debut de sa phrase, `source = "{doc}#..."`, ne bouge pas avec la doc')
+
+
+def sources_a_recaler(enoncees) -> list[tuple[str, str, str]]:
+    """(nom, source, pourquoi) des règles dont la `source` ne désigne plus aucune règle énoncée.
+
+    Les `[[regles]]` à motif comme les `hors_portee` : une règle renommée dans
+    la doc redevenait « sans contrôle » sans que rien ne dise qu'une règle de
+    `regles.toml` la visait encore.
+    """
+    recaler = []
+    for regle in [*config.REGLES_MAISON, *config.HORS_PORTEE]:
+        if not regle.get("source"):
+            continue
+        ligne, pourquoi = ligne_designee(str(regle["source"]), enoncees)
+        if ligne is None:
+            recaler.append((regle["nom"], str(regle["source"]), pourquoi))
+    return recaler
+
+
 def regles_sans_controle() -> list[tuple[str, int, str, list[str]]]:
     """Celles qu'aucun `[[regles]]` ne fait respecter.
 
     Deux façons d'être couverte, de la plus sûre à la plus souple :
 
-    1. `source = "CLAUDE.md:23"` dans le regles.toml — un lien EXPLICITE,
-       posé par `--init` ou à la main. Aucune ambiguïté possible.
+    1. `source = "CLAUDE.md#debut de la phrase"` dans le regles.toml : un
+       lien EXPLICITE, posé par `lintorn regles` ou à la main (voir
+       `ligne_designee`). Aucune ambiguïté possible.
     2. sinon, un identifiant de la ligne se retrouve dans le nom ou le motif
        d'une règle configurée. Heuristique, volontairement indulgente : mieux
        vaut taire une règle déjà surveillée que crier au trou sur une règle
        qui l'est — un contrôle qui crie trop est un contrôle qu'on n'ouvre
        plus.
 
-    ⚠️ Un `source` qui ne correspond plus — la doc a bougé d'une ligne — fait
-    RÉAPPARAÎTRE la règle comme non couverte. C'est le bon sens d'échec : on
-    ré-alerte au lieu de masquer en silence.
+    ⚠️ Un `source` qui ne désigne plus rien (la phrase a changé, ou la doc a
+    bougé d'une ligne sous un `CLAUDE.md:23`) fait RÉAPPARAÎTRE la règle
+    comme non couverte. C'est le bon sens d'échec : on ré-alerte au lieu de
+    masquer en silence.
     """
+    enoncees = regles_enoncees()
     sources = {
-        str(regle["source"]) for regle in config.REGLES_MAISON if regle.get("source")
+        ligne_designee(str(regle["source"]), enoncees)[0]
+        for regle in config.REGLES_MAISON if regle.get("source")
     }
 
     # La « signature » de ce qui DÉTECTE : le nom et le motif, rien d'autre.
@@ -157,7 +225,7 @@ def regles_sans_controle() -> list[tuple[str, int, str, list[str]]]:
     ))
 
     restantes = []
-    for relatif, numero, phrase, jetons in regles_enoncees():
+    for relatif, numero, phrase, jetons in enoncees:
         if f"{relatif}:{numero}" in sources:
             continue
         signes = [_signe(jeton) for jeton in jetons]
@@ -237,17 +305,18 @@ def controle_regles_declarees() -> Resultat:
             bloquant=False,
         )
 
-    tenables, rompues = _hors_portee_tenables()
+    raisons, rompues = _hors_portee_tenables()
     # ⚠️ Un `hors_portee` ne compte que s'il désigne une règle ÉNONCÉE. Sa
     # `source` peut viser une ligne qui a bougé, ou qui n'a jamais énoncé de
     # règle : compté quand même, il faisait descendre les « controlees » sous
     # zéro — et il ne couvrait rien.
-    sources_enoncees = {f"{chemin}:{numero}" for chemin, numero, _, _ in enoncees}
-    fantomes = [f"- **{decl['nom']}** ({decl['source']}) — cette ligne n'enonce aucune "
-                "regle : la doc a bouge, ou la `source` est fausse"
-                for decl in config.HORS_PORTEE if decl["source"] not in sources_enoncees]
-    tenables = {source: raison for source, raison in tenables.items()
-                if source in sources_enoncees}
+    tenables: dict[str, str] = {}
+    for decl in config.HORS_PORTEE:
+        ligne, _ = ligne_designee(decl["source"], enoncees)
+        if ligne is not None and decl["source"] in raisons:
+            tenables[ligne] = raisons[decl["source"]]
+    fantomes = [f"- **{nom}** ({source}) : {pourquoi}"
+                for nom, source, pourquoi in sources_a_recaler(enoncees)]
     sans_controle = [r for r in regles_sans_controle()
                      if f"{r[0]}:{r[1]}" not in tenables]
 
@@ -274,13 +343,14 @@ def controle_regles_declarees() -> Resultat:
         "la regle dans `regles.toml`, la declarer `hors_portee` avec sa raison, ou",
         "retirer la phrase de la doc si elle a vieilli.",
         "",
-        "`lintorn regles` prepare les blocs `[[regles]]` a completer.",
+        "`lintorn regles` prepare les blocs `[[regles]]` a completer : un `motif`,",
+        "ou la raison d'un `hors_portee`, une ligne par regle.",
         "",
     ]
     if fantomes:
         detail = [
-            "**SANS OBJET** — ces `hors_portee` ne designent aucune regle enoncee ;",
-            "ils ne couvrent donc rien. Recale leur `source` :",
+            "**SANS OBJET** — la `source` de ces regles ne designe aucune regle enoncee :",
+            "elles ne couvrent donc aucune ligne de la doc. Recale leur `source` :",
             "",
             *fantomes,
             "",
@@ -306,8 +376,10 @@ def controle_regles_declarees() -> Resultat:
     # Bloquer un push la-dessus punirait quelqu'un qui a simplement DOCUMENTÉ
     # une intention — l'inverse du comportement qu'on veut encourager.
     suite = [f"{trou} SANS controle"] if trou else []
-    if rompues or fantomes:
-        suite.append(f"{len(rompues) + len(fantomes)} hors_portee a recaler")
+    if rompues:
+        suite.append(f"{len(rompues)} hors_portee a recaler")
+    if fantomes:
+        suite.append(f"{len(fantomes)} source(s) a recaler")
     return Resultat(
         "Regles enoncees vs controlees", "VERIF",
         f"{resume}, {', '.join(suite)}",

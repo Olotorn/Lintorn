@@ -7,6 +7,7 @@ test qui appelle la fonction seule reste vert sur un câblage mort.
 from __future__ import annotations
 
 import importlib.util
+import sys
 
 import pytest
 
@@ -174,10 +175,48 @@ def test_un_outil_lent_qui_a_repondu_note_la_date(tmp_path, monkeypatch, capsys)
     assert "[ OK ]" in ligne
 
 
+def _ligne_du_mode_rapide(monkeypatch, capsys) -> tuple[str, str]:
+    """(la ligne de l'outil lent, toute la sortie) d'un `lintorn rapide`."""
+    monkeypatch.setattr("sys.argv", ["lintorn", "rapide"])
+    cli.main()
+    sortie = capsys.readouterr().out
+    return next(ligne for ligne in sortie.splitlines() if "Failles connues" in ligne), sortie
+
+
+def test_le_mode_rapide_redit_les_failles_du_dernier_audit_complet(tmp_path, monkeypatch, capsys):
+    """Six failles trouvées par l'audit complet tenaient, en mode rapide, dans
+    un « NON EXECUTE » sous un « Audit complet » au vert."""
+    faille = [sys.executable, "-c", "print('6 failles'); raise SystemExit(1)"]
+    lancer = _audit(tmp_path, monkeypatch, [_lent(tmp_path, faille)])
+    lancer(capsys)
+
+    ligne, sortie = _ligne_du_mode_rapide(monkeypatch, capsys)
+
+    assert "NON EXECUTE (mode --rapide)" in ligne
+    assert "au dernier audit complet (il y a 0 jour(s))" in ligne
+    assert "[ -- ]" in ligne, "l'outil n'a pas tourne : rien ne doit le compter comme verifie"
+    assert "non bloquant(s) signalent quelque chose" in sortie
+    assert "rien a signaler" not in sortie
+
+
+def test_un_audit_complet_propre_efface_le_rappel(tmp_path, monkeypatch, capsys):
+    """Les failles corrigées ne doivent pas être redites à jamais."""
+    commande = _lent(tmp_path, [sys.executable, "-c", "raise SystemExit(1)"])
+    lancer = _audit(tmp_path, monkeypatch, [commande])
+    lancer(capsys)
+    commande["cmd"] = [sys.executable, "-c", "pass"]
+    monkeypatch.setattr("sys.argv", ["lintorn"])
+    lancer(capsys)
+
+    ligne, _ = _ligne_du_mode_rapide(monkeypatch, capsys)
+
+    assert "au dernier audit complet" not in ligne
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Le focus du push ne dit « aucun défaut » que sur ce qu'un contrôle a lu
 # ─────────────────────────────────────────────────────────────────────────────
-def _pousser(tmp_path, monkeypatch, capsys, *fichiers):
+def _pousser(tmp_path, monkeypatch, capsys, *fichiers, internes=None):
     for nom in fichiers:
         (tmp_path / nom).write_text("", encoding="utf-8")
     faux_ruff = {"cle": "ruff", "titre": "Ruff (lint Python)", "cmd": ["git", "--version"],
@@ -185,7 +224,9 @@ def _pousser(tmp_path, monkeypatch, capsys, *fichiers):
     monkeypatch.setattr(config, "RACINE", tmp_path)
     monkeypatch.setattr(config, "SOMMET_GIT", None)
     monkeypatch.setattr(config, "COMMANDES", [faux_ruff])
-    monkeypatch.setattr(config, "CONTROLES_INTERNES", {})
+    monkeypatch.setattr(config, "CONTROLES_INTERNES", dict.fromkeys(internes or {}, True))
+    for nom, controle in (internes or {}).items():
+        monkeypatch.setitem(noyau.CONTROLES_INTERNES, nom, controle)
     monkeypatch.setattr(lintorn.rapport.markdown, "ecrire_rapport", lambda resultats, hook=False: True)
     monkeypatch.setattr("sys.argv", ["lintorn", "--rapide", "--fichiers", *fichiers])
     cli.main()
@@ -199,6 +240,18 @@ def test_le_focus_ne_dit_pas_propre_un_fichier_qu_aucun_controle_ne_lit(tmp_path
 
     assert "[ OK ]" not in ligne
     assert "aucun controle ne lit" in ligne and "Commande.cs" in ligne
+
+
+def test_un_fichier_que_cite_un_controle_n_est_pas_lu_pour_autant(tmp_path, monkeypatch, capsys):
+    """Le conseil du hook nomme `lefthook.yml` : poussé seul, il devenait « un
+    point a verifier », et le push finissait sur « Lintorn OK »."""
+    conseil = lambda: Resultat("Hook pre-push (Lintorn)", "VERIF", "a voir",  # noqa: E731
+                               "Ajoute ce bloc a lefthook.yml", bloquant=False)
+
+    ligne = _pousser(tmp_path, monkeypatch, capsys, "lefthook.yml",
+                     internes={"hook_git": conseil})
+
+    assert "aucun controle ne lit" in ligne and "lefthook.yml" in ligne, ligne
 
 
 def test_le_focus_nomme_la_part_non_lue_d_un_push_mixte(tmp_path, monkeypatch, capsys):

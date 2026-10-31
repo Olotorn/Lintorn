@@ -73,13 +73,25 @@ def _console_sure() -> None:
 COMMANDES = [
     (("-h", "--help", "--aide"), lambda args: aide.afficher_aide()),
     (("-V", "--version"), lambda args: aide.afficher_version()),
-    (("--confiance",), lambda args: commandes.confiance.accorder(sans_demander="--oui" in args)),
-    (("--installer-hook",), lambda args: commandes.hook.installer_hook(forcer="--force" in args)),
+    # `hook --status` avant `--status` : la première option reconnue gagne.
+    (("--installer-hook",),
+     lambda args: commandes.hook.etat_du_hook() if "--status" in args
+     else commandes.hook.retirer_hook() if "--rm" in args
+     else commandes.hook.installer_hook(forcer="--force" in args)),
+    (("--status",), lambda args: commandes.status.afficher()),
+    (("--confiance",),
+     lambda args: commandes.confiance.retirer() if "--rm" in args
+     else commandes.confiance.accorder(sans_demander="--oui" in args)),
     (("--installer-outils",),
      lambda args: commandes.outils.installer_outils(sans_demander="--oui" in args)),
     (("--guide",), lambda args: aide.afficher_guide()),
     (("--init",), lambda args: commandes.init.init(ecraser="--force" in args)),
-    (("--esquisser-regles",), lambda args: commandes.regles.esquisser_regles()),
+    (("--esquisser-regles",),
+     lambda args: commandes.regles.tester() if "--test" in args
+     else commandes.regles.esquisser_regles()),
+    (("--corriger",), lambda args: commandes.corrige.corriger()),
+    (("--rapport",), lambda args: commandes.rapport.ouvrir(push=False)),
+    (("--rapport-push",), lambda args: commandes.rapport.ouvrir(push=True)),
     (("--maj-securite",),
      lambda args: commandes.securite.maj_securite(appliquer="--appliquer" in args)),
 ]
@@ -102,7 +114,11 @@ NOMS_COURTS = {
     "rapide": ["--rapide"],
     "doc": ["--doc"],
     "init": ["--init"],
-    "regles": ["--esquisser-regles"],
+    "regles": ["--esquisser-regles"],       # + `--test` pour essayer chaque regle
+    "corrige": ["--corriger"],
+    "status": ["--status"],
+    "rapport": ["--rapport"],
+    "rapport-push": ["--rapport-push"],
     "confiance": ["--confiance"],
     "hook": ["--installer-hook"],
     "outils": ["--installer-outils"],
@@ -131,10 +147,12 @@ def _traduire_nom_court(args: list[str]) -> list[str]:
 # La liste se DÉDUIT du sommaire : une commande ajoutée là est comprise ici,
 # sans seconde liste à tenir à jour.
 _OPTIONS_AUDIT = {"--rapide", "--doc", "--fichiers", "--fichiers-stdin"}
-_PRECISIONS = {"--force", "--oui", "--appliquer"}     # lues par une commande
+_PRECISIONS = {"--force", "--oui", "--appliquer", "--rm", "--test"}     # lues par une commande
 # La commande que chaque précision précise. Seule, `--force` lançait un audit
 # complet sans rien dire de l'option qu'on venait de taper.
 _PRECISIONS_DE = {"--force": ("--init", "--installer-hook"),
+                  "--rm": ("--installer-hook", "--confiance"),
+                  "--test": ("--esquisser-regles",),
                   "--oui": ("--confiance", "--installer-outils"),
                   "--appliquer": ("--maj-securite",)}
 OPTIONS = ({option for options, _ in COMMANDES for option in options}

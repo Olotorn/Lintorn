@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 import re
 import subprocess
 
@@ -89,9 +90,11 @@ def _commits_depuis(depuis: str, pathspecs: list[str]) -> tuple[int, list[str] |
     DOIT distinguer « rien n'a bougé » de « je n'ai pas pu regarder » : c'est
     précisément la confusion qui a rendu ce contrôle faussement vert.
     """
+    # `--relative` : les noms depuis la racine du projet, comme ceux de
+    # `git diff --relative` auxquels `_deja_relus` les compare.
     try:
         sortie = config.git("log", f"--since={depuis}", f"--format=format:{_SENTINELLE}",
-                            "--name-only", "--", *pathspecs, timeout=30)
+                            "--name-only", "--relative", "--", *pathspecs, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return 0, None
 
@@ -109,14 +112,8 @@ def _commits_depuis(depuis: str, pathspecs: list[str]) -> tuple[int, list[str] |
     return nb, sorted(touches)
 
 
-def _modifies_depuis(moment: datetime.datetime, pathspecs: list[str]) -> list[str] | None:
-    """Les fichiers cités modifiés APRÈS `moment` et pas encore commités ; None si git se tait.
-
-    `git log` ne voit que les commits : du code cité réécrit sans être commité
-    laissait la fiche « fraîche ». L'heure de modification départage ce qui a
-    changé avant la relecture de ce qui a changé après. Un fichier supprimé
-    n'a plus d'heure : il compte.
-    """
+def _non_commites(pathspecs: list[str]) -> set[str] | None:
+    """Les fichiers cités qui diffèrent du dernier commit, index compris ; None si git se tait."""
     modifies: set[str] = set()
     for indexe in ((), ("--cached",)):
         try:
@@ -127,16 +124,102 @@ def _modifies_depuis(moment: datetime.datetime, pathspecs: list[str]) -> list[st
         if sortie.returncode != 0:
             return None
         modifies.update(nom for nom in sortie.stdout.split("\0") if nom)
-    seuil = moment.timestamp()
-    apres = []
-    for nom in sorted(modifies):
+    return modifies
+
+
+def _ecrit_apres(nom: str, moment: datetime.datetime) -> bool:
+    """Ce fichier a-t-il été écrit après `moment` ? Supprimé, il n'a plus d'heure : oui.
+
+    ⚠️ L'heure de modification se règle : `cp -p`, `rsync -a`, `tar x` posent
+    celle de la source, et un fichier remplacé par une vieille copie passait
+    pour écrit avant la relecture. L'heure de changement (`st_ctime`) ne se
+    règle pas : elle dit quand le fichier a changé sur CE disque. Sous
+    Windows, `st_ctime` est l'heure de création : l'heure de modification seule.
+    """
+    try:
+        etat = (config.RACINE / nom).stat()
+    except OSError:
+        return True
+    ecrit = etat.st_mtime if os.name == "nt" else max(etat.st_mtime, etat.st_ctime)
+    return ecrit >= moment.timestamp()
+
+
+def _head_au_moment(moment: datetime.datetime) -> str | None:
+    """Le commit de HEAD au moment de la relecture, d'après le journal de git (reflog).
+
+    None quand le journal ne remonte pas jusque-là : clone plus récent que
+    la relecture, journal coupé ou purgé. Le journal note à la seconde : ce
+    qui est noté dans la seconde même de la relecture compte comme après.
+    """
+    try:
+        sortie = config.git("reflog", "show", "--date=unix", "--format=%H%x09%gd", "HEAD",
+                            "--", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if sortie.returncode != 0:
+        return None
+    limite = moment.timestamp()
+    for ligne in sortie.stdout.splitlines():          # du plus récent au plus ancien
+        commit, _, reference = ligne.partition("\t")
         try:
-            if (config.RACINE / nom).stat().st_mtime < seuil:
-                continue
-        except OSError:
-            pass
-        apres.append(nom)
-    return apres
+            heure = int(reference[reference.rindex("@{") + 2:].rstrip("}"))
+        except ValueError:
+            continue
+        if heure < limite:
+            return commit
+    return None
+
+
+def _changes_depuis(avant: str, pathspecs: list[str]) -> set[str] | None:
+    """Les fichiers cités dont le contenu commité diffère entre `avant` et HEAD.
+
+    Un fichier seulement déplacé (`R100`) n'a pas changé. None si git se tait
+    (commit d'avant purgé, par exemple).
+    """
+    try:
+        sortie = config.git("diff", "--name-status", "-z", "-M", "--relative", avant, "HEAD",
+                            "--", *pathspecs, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if sortie.returncode != 0:
+        return None
+    changes: set[str] = set()
+    champs = iter(sortie.stdout.split("\0"))
+    for statut in champs:
+        if not statut:
+            break
+        # Un déplacement ou une copie nomme deux chemins : l'ancien, puis le nouveau.
+        chemin = next(champs, "")
+        if statut[:1] in ("R", "C"):
+            chemin = next(champs, "")
+        if chemin and statut != "R100":
+            changes.add(chemin)
+    return changes
+
+
+def _modifies_depuis(moment: datetime.datetime, non_commites: set[str]) -> list[str]:
+    """Les fichiers cités modifiés APRÈS `moment` et pas encore commités.
+
+    `git log` ne voit que les commits : du code cité réécrit sans être commité
+    laissait la fiche « fraîche ». L'heure de modification départage ce qui a
+    changé avant la relecture de ce qui a changé après.
+    """
+    return [nom for nom in sorted(non_commites) if _ecrit_apres(nom, moment)]
+
+
+def _deja_relus(touches: list[str], moment: datetime.datetime,
+                non_commites: set[str]) -> set[str]:
+    """Les fichiers commités depuis `moment` que la relecture a vus tels qu'ils sont.
+
+    Une fiche relue, puis commitée avec le code qu'elle décrit, devenait
+    suspecte juste après ce commit : il est postérieur à sa date, mais il
+    enregistre ce qui était déjà sur le disque. Un fichier identique au
+    dernier commit, et écrit avant `moment`, n'a pas changé depuis la
+    relecture. Ce que git change (pull, checkout, revert), il le réécrit :
+    l'heure du fichier le dit.
+    """
+    return {nom for nom in touches
+            if nom not in non_commites and not _ecrit_apres(nom, moment)}
 
 
 def _liste(fichiers: list[str]) -> str:
@@ -231,14 +314,35 @@ def _controle_fraicheur_memoire() -> Resultat:
             jamais.append(doc.name)       # `2026-02-31` : pas une date, donc pas datée
             continue
 
-        nb, touches = _commits_depuis(moment.strftime("%Y-%m-%d %H:%M:%S"), pathspecs)
-        modifies = _modifies_depuis(moment, pathspecs)
-        if touches is None or modifies is None:
+        depuis = moment.strftime("%Y-%m-%d %H:%M:%S")
+        nb, touches = _commits_depuis(depuis, pathspecs)
+        non_commites = _non_commites(pathspecs)
+        if touches is None or non_commites is None:
             # git n'a pas répondu : on ne SAIT pas. Surtout ne pas compter
             # cette mémoire comme fraîche — ce serait affirmer sans avoir vu.
             injoignables.append(doc.name)
             continue
-        if nb == 0 and not modifies:
+        # Ce qui a changé dans les commits depuis la relecture. `git log
+        # --since` lit la date des commits : celui d'un collègue, fait avant
+        # la relecture et tiré après, ne comptait jamais. Le journal de git
+        # dit où était HEAD à ce moment-là ; il sait aussi qu'un fichier
+        # déplacé, ou revenu à l'identique, n'a pas changé. Sans lui (clone
+        # plus récent que la relecture), les dates des commits.
+        avant = _head_au_moment(moment)
+        changes = _changes_depuis(avant, pathspecs) if avant else None
+        candidats = sorted(changes) if changes is not None else touches
+        relus = _deja_relus(candidats, moment, non_commites)
+        suspects = [nom for nom in candidats if nom not in relus]
+        # Recomptés sur ce qui reste : un commit qui n'a touché que du
+        # contenu déjà relu ne compte plus.
+        restants = [f":(literal){nom}" for nom in touches if nom in suspects]
+        nb, touches = _commits_depuis(depuis, restants) if restants else (0, [])
+        if touches is None:
+            injoignables.append(doc.name)
+            continue
+        tires = [nom for nom in suspects if nom not in touches]
+        modifies = _modifies_depuis(moment, non_commites)
+        if nb == 0 and not tires and not modifies:
             fraiches += 1
             continue
 
@@ -246,6 +350,9 @@ def _controle_fraicheur_memoire() -> Resultat:
         raisons = []
         if nb:
             raisons.append(f"**{nb} commit(s) depuis** sur :\n{_liste(touches)}")
+        if tires:
+            raisons.append(f"**{len(tires)} fichier(s) change(s) par git depuis** (un pull, une "
+                           f"fusion, un changement de branche) :\n{_liste(tires)}")
         if modifies:
             raisons.append(f"**{len(modifies)} fichier(s) modifie(s) depuis, pas encore "
                            f"commite(s)** :\n{_liste(modifies)}")

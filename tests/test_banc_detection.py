@@ -546,6 +546,34 @@ def test_init_reclame_toujours_un_venv_a_un_projet_python_qui_n_en_a_pas(tmp_pat
     assert "AUCUN VENV TROUVE" in modele
 
 
+def test_init_ne_dit_ecrit_que_ce_qu_il_a_ecrit(tmp_path):
+    """Relancé sur un `regles.toml` et un `.gitignore` déjà là, `init` n'y touche
+    pas : il les annonçait pourtant « Ecrit », et faisait décommenter des
+    esquisses qu'il n'avait pas écrites."""
+    _ecrire(tmp_path, {"pyproject.toml": '[project]\nname = "x"\n', "app.py": "",
+                       "CLAUDE.md": "| Sujet | Regle |\n|---|---|\n"
+                                    "| Affichage | Jamais de `print()` dans `app.py` |\n"})
+
+    def ligne(affiche: str, nom: str) -> str:
+        return next(texte for texte in affiche.splitlines() if nom in texte)
+
+    affiche, _ = _init(tmp_path)
+    assert ligne(affiche, "regles.toml").startswith("Ecrit")
+    assert ligne(affiche, ".gitignore").startswith("Ecrit")
+    assert "decommente" in affiche
+
+    regles = tmp_path / ".lintorn" / "regles.toml"
+    regles.write_text('[[regles]]\nnom = "Pas de print"\n', encoding="utf-8")
+    (tmp_path / ".lintorn" / "config.toml").unlink()
+    affiche, _ = _init(tmp_path)
+
+    assert regles.read_text(encoding="utf-8") == '[[regles]]\nnom = "Pas de print"\n'
+    assert ligne(affiche, "regles.toml").startswith("Garde")
+    assert "rien n'y est ecrit" in ligne(affiche, "regles.toml")
+    assert ligne(affiche, ".gitignore").startswith("Garde")
+    assert "decommente" not in affiche
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # B9 — pas de préfixe pour un dossier qui n'existe pas
 # ─────────────────────────────────────────────────────────────────────────────

@@ -3,8 +3,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .. import base, chemins, config
 from . import dossier_lintorn, regles
+
+
+def _octets(fichier: Path) -> bytes | None:
+    try:
+        return fichier.read_bytes()
+    except OSError:
+        return None
 
 
 def _controles_du_modele() -> list[tuple[str, str, bool]]:
@@ -110,7 +119,7 @@ def init(ecraser: bool = False) -> int:
 
     lignes = [
         "# Configuration de Lintorn pour ce projet.",
-        "#   https://gitlab.com/DamXs/lintorn",
+        "#   https://gitlab.com/olotorn/lintorn",
         "#",
         f"# Genere par `lintorn init`. Detecte : {', '.join(detecte) or 'rien de connu'}.",
         "",
@@ -199,14 +208,21 @@ def init(ecraser: bool = False) -> int:
         print(f"Echec : {erreur}")
         return 1
 
+    # « Ecrit » seulement pour ce qui l'a été. Annoncé sur un fichier laissé tel
+    # quel, il faisait croire que les règles de l'utilisateur avaient été
+    # remplacées. Le verbe vient du disque, pas du message rendu.
+    gitignore = cible.parent / ".gitignore"
+    avant = _octets(gitignore)
     garde = dossier_lintorn.poser_gitignore_interne(cible.parent)
+    verbe_gitignore = "Ecrit" if _octets(gitignore) != avant else "Garde"
 
     # `regles.toml` est ecrit MEME vide de regles : un fichier absent laisse
     # croire que la fonctionnalite n'existe pas. Present et commente, il
     # montre la forme a remplir.
     esquisses = regles.esquisses_regles()
     fichier_regles = config.FICHIER_REGLES
-    if not fichier_regles.exists():
+    regles_ecrites = not fichier_regles.exists()
+    if regles_ecrites:
         try:
             base.ecrire_fichier_du_projet(fichier_regles, regles.contenu_regles_toml(esquisses))
         except OSError as erreur:
@@ -214,16 +230,22 @@ def init(ecraser: bool = False) -> int:
             return 1
 
     relatif = cible.relative_to(config.RACINE)
-    nombre = sum(1 for ligne in esquisses if ligne == "# [[regles]]")
-    resume_regles = (f"{nombre} regle(s) de ta doc, en esquisse a completer"
-                     if nombre else "la forme a remplir, en commentaire")
+    # Des esquisses qui n'ont pas été écrites ne se décommentent pas.
+    nombre = sum(1 for ligne in esquisses if ligne == "# [[regles]]") if regles_ecrites else 0
+    if not regles_ecrites:
+        resume_regles = "deja present, rien n'y est ecrit"
+    elif nombre:
+        resume_regles = f"{nombre} regle(s) de ta doc, en esquisse a completer"
+    else:
+        resume_regles = "la forme a remplir, en commentaire"
+    verbe_regles = "Ecrit" if regles_ecrites else "Garde"
     print(f"Projet detecte : {', '.join(detecte) or 'rien de connu'}")
     if config.PY_SANS_TEMOIN:
         print("                 (des fichiers .py, mais ni pyproject.toml ni equivalent :")
         print("                  les outils Python ne tourneront pas - voir le rapport)")
     print(f"Ecrit          : {relatif}")
-    print(f"Ecrit          : {fichier_regles.relative_to(config.RACINE)} - {resume_regles}")
-    print(f"Ecrit          : {relatif.parent / '.gitignore'} - {garde}")
+    print(f"{verbe_regles:<15}: {fichier_regles.relative_to(config.RACINE)} - {resume_regles}")
+    print(f"{verbe_gitignore:<15}: {relatif.parent / '.gitignore'} - {garde}")
     print()
     print("A FAIRE MAINTENANT :")
     print(f"    1. ouvre {relatif} et active les controles que tu veux")

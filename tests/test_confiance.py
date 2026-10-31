@@ -366,3 +366,29 @@ def test_un_script_inchange_ne_redemande_rien(projet, monkeypatch):
     assert len(_terminal(monkeypatch)) == 0
     noyau.executer()
     assert temoin.read_text().splitlines() == ["gentil", "gentil"]
+
+
+def test_confiance_rm_retire_l_accord_de_ce_projet_et_de_lui_seul(projet, monkeypatch, capsys,
+                                                                   tmp_path):
+    """Retirer un accord demandait d'éditer confiance.json à la main."""
+    entree = _entree(_outil(projet, "ruff", projet / "temoin"))
+    monkeypatch.setattr(config, "COMMANDES", [entree])
+    questions = _terminal(monkeypatch, "o", "o")
+    noyau.executer()
+    voisin = tmp_path / "voisin"
+    voisin.mkdir()
+    monkeypatch.setattr(config, "RACINE", voisin)
+    assert confiance.enregistrer([entree]) is None
+    monkeypatch.setattr(config, "RACINE", projet)
+    capsys.readouterr()
+    monkeypatch.setattr("sys.argv", ["lintorn", "confiance", "--rm"])
+
+    retire = cli.main()
+    sortie = capsys.readouterr().out
+    encore = cli.main()
+    noyau.executer()
+
+    assert retire == 0 and "Accord retire : 1 commande(s)" in sortie
+    assert encore == 0 and "Rien a retirer" in capsys.readouterr().out
+    assert len(questions) == 2, "sans accord, Lintorn redemande"
+    assert str(voisin.resolve()) in json.loads(confiance.fichier().read_text(encoding="utf-8"))

@@ -29,6 +29,7 @@ class Passage(NamedTuple):
     pousse: datetime | None   # dernier push que git a noté
     couvert: bool             # le hook appelle Lintorn : il a vérifié ce push, ou tourné depuis
     malgre_refus: bool = False  # ce push portait un commit que Lintorn avait refusé, sans recours
+    en_partie: bool = False     # Lintorn n'a vérifié qu'une partie des branches de ce push
 
 
 class Conseil(NamedTuple):
@@ -39,6 +40,7 @@ class Conseil(NamedTuple):
     langage: str       # du bloc de code du rapport : bash, yaml, json
     ensuite: str = ""  # la commande à lancer après, s'il y en a une
     garde: str = ""    # la mise en garde à lire avant de copier, s'il y en a une
+    script: tuple[Path, str] | None = None   # un script que l'ajout lance : (où, son contenu)
 
 
 # Les seuls noms que git lance (githooks(5)). Un README ou un script d'aide
@@ -136,14 +138,18 @@ def conseil(autres: AutresHooks) -> Conseil:
             "        verbose: true",
             "yaml", "pre-commit install --hook-type pre-push")
     if outil == "lefthook":
-        fichier = next((sommet / nom for nom in ("lefthook.yml", ".lefthook.yml", "lefthook.yaml",
-                                                  ".lefthook.yaml") if (sommet / nom).is_file()),
-                       sommet / "lefthook.yml")
+        fichier = _config_lefthook(sommet)
+        # Un SCRIPT, pas une commande : lefthook saute une commande quand il ne
+        # voit aucun fichier à pousser (une branche où l'on n'est pas, un tag,
+        # une suppression), et le push partait sans Lintorn. Un script tourne
+        # à chaque push, avec les arguments de git.
         return Conseil(
             fichier, f"lefthook reecrit ses scripts : ajoute ce bloc a {chemins.relatif(fichier)}"
                      " (dans ta section `pre-push:` si tu en as deja une)",
-            f"pre-push:\n  commands:\n    lintorn:\n      run: {en_yaml}\n      use_stdin: true",
-            "yaml", "lefthook install")
+            'pre-push:\n  scripts:\n    "lintorn.sh":\n      runner: sh\n      use_stdin: true',
+            "yaml", "lefthook install",
+            script=(sommet / _dossier_scripts_lefthook(fichier) / "pre-push" / "lintorn.sh",
+                    f'#!/bin/sh\nexec {script} "$@"'))
     if outil == "simple-git-hooks":
         fichier = sommet / "package.json"
         commande = json.dumps(f'{script} "$@"', ensure_ascii=False)
@@ -166,6 +172,24 @@ def conseil(autres: AutresHooks) -> Conseil:
     return Conseil(fichier, f"ajoute cette ligne a {chemins.relatif(fichier)}, avant tout `exit`"
                             " (cree-le s'il n'existe pas, et rends-le executable)",
                    ligne_a_ajouter(), "bash", garde=garde)
+
+
+def _config_lefthook(sommet: Path) -> Path:
+    return next((sommet / nom for nom in ("lefthook.yml", ".lefthook.yml", "lefthook.yaml",
+                                          ".lefthook.yaml") if (sommet / nom).is_file()),
+                sommet / "lefthook.yml")
+
+
+_RX_SOURCE_DIR = re.compile(r"""^source_dir:\s*["']?([^"'#\n]+?)["']?\s*(?:#.*)?$""", re.M)
+
+
+def _dossier_scripts_lefthook(fichier: Path) -> str:
+    """Le dossier où lefthook cherche ses scripts : `source_dir`, `.lefthook` sinon."""
+    try:
+        trouve = _RX_SOURCE_DIR.search(fichier.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        trouve = None
+    return trouve.group(1).strip().rstrip("/") if trouve else ".lefthook"
 
 
 def _partage_par_tous(reglage: str) -> str:
@@ -378,6 +402,13 @@ def noter_passage() -> None:
         if isinstance(trace.get("commits"), list) else []
     trace["quand"] = datetime.now().astimezone().isoformat(timespec="seconds")
     trace["commits"] = list(dict.fromkeys(_commits_pousses(avec_head=True) + anciens))[:TRACE_MAX]
+    # pre-commit ne donne que la première branche d'un push : un commit vérifié
+    # par lui ne dit rien des autres branches parties avec.
+    if os.environ.get("PRE_COMMIT_TO_REF") or os.environ.get("PRE_COMMIT_LOCAL_BRANCH"):
+        partiels = trace.get("partiels") if isinstance(trace.get("partiels"), list) else []
+        trace["partiels"] = list(dict.fromkeys(
+            _commits_pousses(avec_head=False) + [c for c in partiels if isinstance(c, str)]
+        ))[:TRACE_MAX]
     base.ecrire_etat(CLE_PASSAGE, trace)
 
 
@@ -442,6 +473,7 @@ class _Trace(NamedTuple):
     vu: datetime | None
     commits: set[str]             # vus par Lintorn pendant un push
     refuses: dict[str, int]       # refusés sans recours : commit -> heure (secondes epoch)
+    partiels: frozenset[str] = frozenset()   # vus sous pre-commit, qui ne donne que la première branche
 
 
 def _trace(projet: Path) -> _Trace:
@@ -468,10 +500,13 @@ def _trace(projet: Path) -> _Trace:
         return rien      # daté du futur : ne prouve rien
     commits = trace.get("commits")
     refuses = trace.get("refuses")
+    partiels = trace.get("partiels")
     return _Trace(
         vu, {c for c in commits if isinstance(c, str)} if isinstance(commits, list) else set(),
         {c: h for c, h in refuses.items() if isinstance(h, int)}
-        if isinstance(refuses, dict) else {})
+        if isinstance(refuses, dict) else {},
+        frozenset(c for c in partiels if isinstance(c, str)) if isinstance(partiels, list)
+        else frozenset())
 
 
 def _dernier_passage() -> _Trace:
@@ -481,20 +516,24 @@ def _dernier_passage() -> _Trace:
     est commun), le passage seulement dans celui qui a poussé : lu ici seul,
     un push fait — et vérifié — depuis un autre worktree passait pour parti sans Lintorn.
     """
-    vus, commits, refuses = [], set(), {}
+    vus, commits, refuses, partiels = [], set(), {}, set()
     for projet in (config.RACINE, *projets_jumeaux()):
         trace = _trace(projet)
         if trace.vu is not None:
             vus.append(trace.vu)
             commits |= trace.commits
+            partiels |= trace.partiels
             for commit, heure in trace.refuses.items():
                 refuses[commit] = max(heure, refuses.get(commit, heure))
     return _Trace(max(vus, key=lambda moment: moment.timestamp()) if vus else None,
-                  commits, refuses)
+                  commits, refuses, frozenset(partiels))
 
 
-def _push_notes() -> list[tuple[int, str]]:
-    """Les push que git a notés : (heure en secondes epoch, commit envoyé)."""
+def _push_notes() -> list[tuple[int, str, str]]:
+    """Les push que git a notés : (heure en secondes epoch, commit envoyé, branche distante).
+
+    Du plus récent au plus ancien, branche par branche, comme git les rend.
+    """
     try:
         sortie = config.git("reflog", "show", "--date=unix", "--format=%H%x09%gd%x09%gs",
                             "--remotes")
@@ -507,7 +546,8 @@ def _push_notes() -> list[tuple[int, str]]:
         if libelle != LIBELLE_PUSH or "@{" not in reference:
             continue
         try:
-            notes.append((int(reference[reference.rindex("@{") + 2:].rstrip("}")), commit))
+            coupe = reference.rindex("@{")
+            notes.append((int(reference[coupe + 2:].rstrip("}")), commit, reference[:coupe]))
         except ValueError:
             continue
     return notes
@@ -532,20 +572,41 @@ def passage(depuis: float | None = None) -> Passage:
     reste couvert : le hook est branché, c'est ce push-là qui l'a contourné.
     `malgre_refus` le dit quand même, quand le refus était sans recours.
     """
-    vu, commits, refuses = _dernier_passage()
-    notes = [(heure, commit) for heure, commit in _push_notes()
+    vu, commits, refuses, partiels = _dernier_passage()
+    notes = [(heure, commit, branche) for heure, commit, branche in _push_notes()
              if depuis is None or heure >= depuis]
     if not notes:
         return Passage(vu, None, vu is not None)
-    dernier = max(heure for heure, _ in notes)
+    dernier = max(heure for heure, _, _ in notes)
     # Un même `git push` met à jour toutes ses branches dans la même seconde. Une
-    # marge de deux secondes fondait deux push distincts en un seul.
-    envoyes = {commit for heure, commit in notes if heure == dernier}
-    # `>=` : git note ses push à la seconde. Lintorn qui tourne dans la seconde
-    # du push précédent (un push juste après un autre) le disait parti sans lui.
-    couvert = vu is not None and (vu.timestamp() >= dernier or bool(commits & envoyes))
+    # marge de deux secondes fondait deux push distincts en un seul. Et deux push
+    # de la même branche dans cette seconde : seul le dernier état compte, celui
+    # d'avant a été remplacé (git rend le plus récent en premier).
+    par_branche: dict[str, str] = {}
+    for heure, commit, branche in notes:
+        if heure == dernier:
+            par_branche.setdefault(branche, commit)
+    envoyes = set(par_branche.values())
+    # git note ses push à la seconde. Pendant un push, le passage noté est celui
+    # de CE lancement, venu après le push précédent même dans la même seconde.
+    # Hors d'un push, la même seconde ne dit pas lequel est venu d'abord : avec
+    # `>=`, un `--no-verify` d'un autre commit, lancé juste après Lintorn,
+    # passait pour vérifié. Seuls les commits du push le couvrent alors.
+    pendant_un_push = os.environ.get("LINTORN_HOOK") == "1"
+    apres = vu is not None and (vu.timestamp() >= dernier if pendant_un_push
+                                else vu.timestamp() > dernier)
+    # Une branche vérifiée couvre la seconde, SAUF sous pre-commit : il ne
+    # transmet que la première branche, et les autres partaient sans que rien
+    # ne le dise. Hors pre-commit, git donne toutes les branches au hook : une
+    # autre branche dans la même seconde est un AUTRE push (un premier push
+    # juste avant la pose du hook, dans un script).
+    verifies = commits & envoyes
+    couvert = vu is not None and (apres or envoyes <= commits
+                                  or bool(verifies and not verifies & partiels))
+    en_partie = not couvert and bool(verifies)
     malgre_refus = any(refuses.get(commit, dernier + 1) <= dernier for commit in envoyes)
-    return Passage(vu, datetime.fromtimestamp(dernier).astimezone(), couvert, malgre_refus)
+    return Passage(vu, datetime.fromtimestamp(dernier).astimezone(), couvert, malgre_refus,
+                   en_partie)
 
 
 def _date(moment: datetime) -> str:
@@ -665,6 +726,15 @@ def controle_hook_git() -> Resultat:
     )
 
 
+def branche_ici() -> bool:
+    """`core.hooksPath` désigne-t-il déjà le dossier de hooks de Lintorn ?"""
+    try:
+        sortie = config.git("config", "--get", "core.hooksPath")
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return _meme_dossier(sortie.stdout.strip().replace("\\", "/"), config.HOOKS_POUR_GIT)
+
+
 def _meme_dossier(configure: str, attendu: str) -> bool:
     """Deux ecritures du meme dossier de hooks designent-elles le meme endroit ?
 
@@ -688,13 +758,25 @@ def _meme_dossier(configure: str, attendu: str) -> bool:
 def _comment_brancher(quoi: Conseil) -> str:
     ensuite = f"Puis lance `{quoi.ensuite}`.\n\n" if quoi.ensuite else ""
     garde = f"**{quoi.garde}**\n\n" if quoi.garde else ""
+    script = (f"Et crée le script qu'il lance, `{chemins.relatif(quoi.script[0])}` :\n\n"
+              f"```sh\n{quoi.script[1]}\n```\n\n" if quoi.script else "")
     return (
         f"Pour garder les deux, {quoi.consigne} :\n\n"
-        f"```{quoi.langage}\n{quoi.ajout}\n```\n\n{ensuite}{garde}"
+        f"```{quoi.langage}\n{quoi.ajout}\n```\n\n{script}{ensuite}{garde}"
         f"Ça lance le hook de Lintorn, que `lintorn hook` pose dans `{config.HOOKS_ATTENDU}/` "
         "sans toucher aux tiens. Pousse ensuite une fois : ce contrôle ne passe au vert "
         "qu'après avoir **vu** Lintorn tourner pendant un push."
     )
+
+
+def _lance_par_une_commande(fichier: Path) -> bool:
+    """La config de lefthook lance-t-elle Lintorn par une commande (`run:`) ?"""
+    try:
+        texte = fichier.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(re.match(r"\s*run:", ligne) and ".lintorn/hooks/pre-push" in ligne
+               for ligne in texte.splitlines())
 
 
 def _bloc_sans_verbose(fichier: Path) -> bool:
@@ -790,6 +872,17 @@ def _controle_depuis_un_autre_hook(titre: str, autres: AutresHooks) -> Resultat:
         if a_jour and a_jour.statut != "OK":
             return a_jour
         quoi = conseil(autres)
+        if _outil(autres) == "lefthook" and _lance_par_une_commande(quoi.fichier):
+            return Resultat(
+                titre, "VERIF",
+                "lefthook saute Lintorn quand il ne voit aucun fichier a pousser"
+                " - lance-le par un script",
+                "Lancé par une commande (`run:`), Lintorn ne tourne pas quand lefthook ne "
+                "voit aucun fichier à pousser : une branche où tu n'es pas, un tag, une "
+                "suppression. Le push part alors sans lui. Un script tourne à chaque push. "
+                "Remplace le bloc par celui-ci :\n\n" + _comment_brancher(quoi),
+                bloquant=False, detail_markdown=True,
+            )
         if _outil(autres) == "pre-commit" and _bloc_sans_verbose(quoi.fichier):
             return Resultat(
                 titre, "VERIF",
@@ -815,6 +908,16 @@ def _controle_depuis_un_autre_hook(titre: str, autres: AutresHooks) -> Resultat:
             f"`{chemins.relatif(autres.dossier)}/`. Y brancher celui de Lintorn les rendrait "
             "**muets**, sans le moindre message. Et Lintorn n'a encore jamais été vu "
             "tourner pendant un push.\n\n" + _comment_brancher(quoi),
+            bloquant=False, detail_markdown=True,
+        )
+    if preuve.en_partie:
+        une_seule = (" pre-commit ne transmet que la première branche d'un push qui en envoie "
+                     "plusieurs (`git push --all`, deux noms) : pousse-les une par une."
+                     if _outil(autres) == "pre-commit" else "")
+        return Resultat(
+            titre, "ALERTE",
+            f"une partie de ton dernier push ({_date(preuve.pousse)}) est partie SANS Lintorn",
+            "Lintorn a vérifié une des branches de ce push, pas les autres." + une_seule,
             bloquant=False, detail_markdown=True,
         )
     return Resultat(

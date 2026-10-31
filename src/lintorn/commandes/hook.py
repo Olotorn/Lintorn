@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 from .. import __version__, base, chemins, config
@@ -43,33 +44,46 @@ def installer_hook(forcer: bool = False) -> int:
         return _cohabiter(autres)
 
     # 1. COPIER le hook du paquet vers le projet.
-    if not _poser_le_script():
+    pose, ancienne = _poser_le_script()
+    if pose is None:
         return 1
 
-    # 2. Dire à git d'aller le chercher là.
-    try:
-        sortie = config.git("config", "core.hooksPath", config.HOOKS_POUR_GIT)
-    except (OSError, subprocess.SubprocessError) as erreur:
-        print(f"Echec : impossible de configurer git ({erreur})")
-        return 1
-    if sortie.returncode != 0:
-        # La phrase de git, pas seulement son code : elle dit exactement ce
-        # qui cloche, là où « code 128 » ne dit rien.
-        print(f"Echec : git a refuse - {sortie.stderr.strip() or f'code {sortie.returncode}'}")
-        return 1
+    # 2. Dire à git d'aller le chercher là, s'il ne le sait pas déjà.
+    deja_branche = hook_git.branche_ici()
+    if not deja_branche:
+        try:
+            sortie = config.git("config", "core.hooksPath", config.HOOKS_POUR_GIT)
+        except (OSError, subprocess.SubprocessError) as erreur:
+            print(f"Echec : impossible de configurer git ({erreur})")
+            return 1
+        if sortie.returncode != 0:
+            # La phrase de git, pas seulement son code : elle dit exactement ce
+            # qui cloche, là où « code 128 » ne dit rien.
+            print(f"Echec : git a refuse - {sortie.stderr.strip() or f'code {sortie.returncode}'}")
+            return 1
     # Après coup, plus rien ne désigne le dossier qu'on vient de remplacer : le
     # contrôle ne pourrait plus dire que ses hooks se sont tus.
     if autres and autres.reglage:
         base.ecrire_etat(hook_git.CLE_REMPLACES, autres.reglage)
 
-    print(f"Hook installe : {config.HOOKS_ATTENDU}/pre-push")
-    print(f"Hook branche  : core.hooksPath = {config.HOOKS_POUR_GIT}")
-    print("Lintorn tournera desormais avant chaque git push.")
-    # ⚠️ Il conseillait de VERSIONNER la copie — que le `.gitignore` de
-    # `.lintorn/` écarte pourtant. Et versionnée, deux versions de Lintorn
-    # dans une équipe se la disputeraient à chaque commit.
-    print("A relancer sur chaque clone, et apres chaque mise a jour de Lintorn")
-    print("(le controle 'Hook pre-push' te le rappellera).")
+    # Ce qui a VRAIMENT changé : « Hook installe » s'affichait aussi sur un hook
+    # déjà en place et à jour, et l'on ne savait plus s'il l'était avant.
+    remplace = f", a la place de {ancienne}" if ancienne and pose == _MIS_A_JOUR else ""
+    print(f"{pose:<16} : {config.HOOKS_ATTENDU}/pre-push (lintorn {__version__}{remplace})")
+    print(f"{'Deja branche' if deja_branche else 'Hook branche':<16} : core.hooksPath = "
+          f"{config.HOOKS_POUR_GIT}")
+    if pose == _A_JOUR and deja_branche:
+        print("Rien a changer.")
+        # L'état, seulement quand rien n'a changé : juste après une pose, un push
+        # fait dans la même seconde, AVANT elle, comptait comme parti sans Lintorn.
+        _dire_l_etat()
+    else:
+        print("Lintorn tournera desormais avant chaque git push.")
+        # ⚠️ Il conseillait de VERSIONNER la copie — que le `.gitignore` de
+        # `.lintorn/` écarte pourtant. Et versionnée, deux versions de Lintorn
+        # dans une équipe se la disputeraient à chaque commit.
+        print("A relancer sur chaque clone, et apres chaque mise a jour de Lintorn")
+        print("(le controle 'Hook pre-push' te le rappellera).")
 
     # `--force`, ou un branchement d'avant ce garde-fou : le dire, et pas une
     # seule fois — le contrôle « Hook pre-push » le rappellera.
@@ -91,14 +105,115 @@ def _montrer(quoi: hook_git.Conseil) -> None:
     print(f"{quoi.consigne} :")
     for ligne in quoi.ajout.split("\n"):
         print(f"    {ligne}")
+    if quoi.script:
+        print(f"et cree le script qu'il lance, {chemins.relatif(quoi.script[0])} :")
+        for ligne in quoi.script[1].split("\n"):
+            print(f"    {ligne}")
     if quoi.ensuite:
         print(f"puis lance :  {quoi.ensuite}")
     if quoi.garde:
         print(quoi.garde)
 
 
-def _poser_le_script() -> bool:
+def retirer_hook() -> int:
+    """`lintorn hook --rm` : débranche le hook de Lintorn et retire sa copie.
+
+    Le dossier de hooks qu'un `lintorn hook --force` avait remplacé est REMIS :
+    ses hooks se taisaient à cause de Lintorn, ils reprennent. Le pre-push d'un
+    autre outil qui appelle Lintorn n'est pas touché : c'est son fichier. On
+    dit quoi y retirer, sinon son prochain push s'arrêterait sur « not found ».
+    """
+    if config.SOUS_GIT is None:
+        print("Echec : git est introuvable sur cette machine.")
+        return 1
+    if not config.SOUS_GIT:
+        print("Rien a retirer : ce dossier n'est pas un depot git.")
+        return 0
+
+    fait = []
+    if hook_git.branche_ici():
+        remis = base.lire_etat().get(hook_git.CLE_REMPLACES)
+        remis = remis if isinstance(remis, str) and remis else ""
+        arguments = (("config", "core.hooksPath", remis) if remis
+                     else ("config", "--unset", "core.hooksPath"))
+        try:
+            sortie = config.git(*arguments)
+        except (OSError, subprocess.SubprocessError) as erreur:
+            print(f"Echec : impossible de configurer git ({erreur})")
+            return 1
+        if sortie.returncode != 0:
+            print(f"Echec : git a refuse - {sortie.stderr.strip() or f'code {sortie.returncode}'}")
+            return 1
+        if remis:
+            base.ecrire_etat(hook_git.CLE_REMPLACES, "")
+            fait.append(f"Hook debranche  : core.hooksPath remis a {remis}, tes hooks d'avant reprennent")
+        else:
+            fait.append("Hook debranche  : core.hooksPath retire")
+
+    try:
+        for copie in (config.HOOKS / "pre-push", config.HOOKS / "version"):
+            if copie.is_file() or copie.is_symlink():
+                base.retirer_sortie(copie)
+                if copie.name == "pre-push":
+                    fait.append(f"Copie retiree   : {config.HOOKS_ATTENDU}/pre-push")
+    except OSError as erreur:
+        print(f"Echec : la copie du hook n'a PAS ete retiree ({erreur})")
+        return 1
+
+    if not fait:
+        print("Rien a retirer : le hook de Lintorn n'est ni branche ni pose dans ce projet.")
+        return 0
+    for ligne in fait:
+        print(ligne)
+    autres = hook_git.autres_hooks()
+    if autres:
+        # Un avertissement, pas un verdict : lire le texte suffit pour dire où regarder.
+        quoi = hook_git.conseil(autres)
+        try:
+            appelle = ".lintorn/hooks/pre-push" in quoi.fichier.read_text(encoding="utf-8",
+                                                                         errors="replace")
+        except OSError:
+            appelle = False
+        if appelle:
+            print()
+            print(f"ATTENTION : {chemins.relatif(quoi.fichier)} appelle encore le hook de Lintorn.")
+            print("Retire-en l'appel, sinon ton prochain push s'arretera sur 'not found'.")
+    print()
+    print("Lintorn ne tournera plus avant tes push. Pour le remettre : lintorn hook")
+    return 0
+
+
+# Ce que `_poser_le_script` a fait de la copie : la première ligne du message.
+_POSE = "Hook installe"
+_MIS_A_JOUR = "Hook mis a jour"
+_A_JOUR = "Hook deja a jour"
+
+
+def etat_du_hook() -> int:
+    """`lintorn hook --status` : ce que dit le contrôle « Hook pre-push », sans rien toucher.
+
+    Code 0 seulement au vert : un script peut s'en servir pour vérifier un clone.
+    """
+    return 0 if _dire_l_etat() == "OK" else 1
+
+
+def _dire_l_etat() -> str:
+    """La ligne du contrôle « Hook pre-push », et son détail s'il n'est pas au vert."""
+    verdict = hook_git.controle_hook_git()
+    print()
+    print(f"{base.MARQUEUR.get(verdict.statut, verdict.statut)} {verdict.titre} : {verdict.resume}")
+    if verdict.statut != "OK" and verdict.detail:
+        # Le détail est écrit pour le rapport : sans son balisage, il se lit ici.
+        for ligne in verdict.detail.splitlines():
+            if not ligne.startswith("```"):
+                print(f"    {ligne.replace('**', '').replace('`', '')}".rstrip())
+    return verdict.statut
+
+
+def _poser_le_script() -> tuple[str | None, str]:
     """Copie le hook du paquet dans le projet, exécutable.
+
+    Rend (ce qui a changé, None en échec ; la version qui avait posé la copie).
 
     ⚠️ Cette étape n'existait pas tant que Lintorn vivait DANS le projet :
     le hook y était déjà, seul `core.hooksPath` manquait. Installé par pip,
@@ -109,32 +224,42 @@ def _poser_le_script() -> bool:
     try:
         cible = config.HOOKS / "pre-push"
         livre = (config.HOOKS_SOURCE / "pre-push").read_bytes()
+        avant = cible.read_bytes() if cible.is_file() and not cible.is_symlink() else None
         # Une copie identique n'est pas réécrite : sa date est celle de la pose,
         # d'où le contrôle compte les push. La réécrire effaçait l'alerte « parti
         # SANS Lintorn » sans que sa cause ait changé.
         # Octets pour octets — une réécriture en texte changerait les fins de
         # ligne sous Windows, et `#!/bin/sh\r` n'est plus un interpréteur.
-        if not (cible.is_file() and not cible.is_symlink() and cible.read_bytes() == livre):
+        change = avant != livre
+        if change:
             base.ecrire_sortie(cible, livre)
         # La version qui a posé la copie : le hook la compare à celle qu'il lance.
         # Le venv d'un autre projet, activé dans le terminal, faisait tourner sa
         # propre version de Lintorn sous ce hook, sans un mot.
         version = config.HOOKS / "version"
         pose_par = f"lintorn {__version__}\n"
-        if not (version.is_file() and not version.is_symlink()
-                and version.read_text(encoding="utf-8") == pose_par):
+        ancienne = ""
+        if version.is_file() and not version.is_symlink():
+            ancienne = version.read_text(encoding="utf-8", errors="replace").strip()[:40]
+        if ancienne != pose_par.strip():
             base.ecrire_sortie(version, pose_par)
+            change = True
         # Sans le bit exécutable, git ignore le hook EN SILENCE. `copyfile` ne
         # transporte pas les permissions : on les pose explicitement plutôt que
-        # d'espérer qu'elles aient suivi.
-        cible.chmod(cible.stat().st_mode | 0o111)
+        # d'espérer qu'elles aient suivi. (Sous Windows, ce bit n'existe pas.)
+        mode = cible.stat().st_mode
+        if os.name != "nt" and not mode & 0o111:
+            change = True
+        cible.chmod(mode | 0o111)
     except OSError as erreur:
         print(f"Echec : impossible d'installer le hook ({erreur})")
-        return False
+        return None, ""
     # Sans `lintorn init` avant, rien n'écartait la copie : un `git add -A` la
     # commitait, en 100644 sous Windows, et le contrôle la déclarait muette.
     dossier_lintorn.poser_gitignore_interne(config.HOOKS.parent)
-    return True
+    if avant is None:
+        return _POSE, ancienne
+    return (_MIS_A_JOUR if change else _A_JOUR), ancienne
 
 
 def _cohabiter(autres: hook_git.AutresHooks) -> int:
@@ -143,20 +268,23 @@ def _cohabiter(autres: hook_git.AutresHooks) -> int:
     Le script est posé quand même : c'est lui que la ligne à ajouter appelle,
     et le reposer est la façon de le mettre à jour.
     """
-    if not _poser_le_script():
+    pose, _ = _poser_le_script()
+    if pose is None:
         return 1
     voisin = hook_git.lintorn_voisin(autres)
     if voisin is not None:
         return _lance_par_un_voisin(voisin)
     preuve = hook_git.passage()
     if preuve.couvert and not preuve.malgre_refus:
-        print(f"Hook mis a jour : {config.HOOKS_ATTENDU}/pre-push")
+        print(f"{pose} : {config.HOOKS_ATTENDU}/pre-push (lintorn {__version__})")
         print("Ton hook l'appelle deja : Lintorn y a ete vu tourner pendant un push.")
+        if pose == _A_JOUR:
+            _dire_l_etat()
         return 0
 
     dossier = chemins.relatif(autres.dossier)
     if preuve.malgre_refus:
-        print(f"Hook mis a jour : {config.HOOKS_ATTENDU}/pre-push")
+        print(f"{pose} : {config.HOOKS_ATTENDU}/pre-push (lintorn {__version__})")
         # Le passage noté prouve que Lintorn a tourné, pas QUI l'a lancé : un
         # refus en mode direct, puis `--no-verify`, ne dit rien de ces hooks-ci.
         print("Lintorn avait refuse ton dernier push, parti malgre son refus : un")

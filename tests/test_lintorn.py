@@ -354,6 +354,8 @@ def test_le_compte_des_hors_portee_reste_affiche(monkeypatch):
     """Les faire disparaitre du resume rendrait la declaration gratuite. Le
     ratio visible est ce qui rend un abus reperable."""
     monkeypatch.setattr(config, "DOCS_IA", [config.RACINE / "CLAUDE.md"])
+    # Les règles du VRAI regles.toml visent les vraies lignes de CLAUDE.md, pas la 50.
+    monkeypatch.setattr(config, "REGLES_MAISON", [])
     monkeypatch.setattr(lintorn.controles.projet.regles_enoncees, "regles_enoncees",
                         lambda: [("CLAUDE.md", 50, "Versions | ...", ["versions"])])
     monkeypatch.setattr(lintorn.controles.projet.regles_enoncees, "regles_sans_controle",

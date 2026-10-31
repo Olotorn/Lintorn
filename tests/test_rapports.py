@@ -424,6 +424,27 @@ def test_la_page_html_n_est_pas_lue_par_les_regles_maison(tmp_path, monkeypatch)
     assert resultat.fichiers == {"vrai.html": "interdit : 1"}
 
 
+def test_une_regle_ne_se_trouve_pas_dans_sa_propre_definition(tmp_path, monkeypatch):
+    """Un brouillon de `lintorn regles` sur un `.toml`, décommenté avec un motif
+    littéral : la règle se trouvait dans regles.toml, et dans la table du
+    pyproject qui la déclare. Le reste du pyproject reste lu."""
+    (tmp_path / ".lintorn").mkdir()
+    (tmp_path / ".lintorn" / "regles.toml").write_text(
+        "[[regles]]\nnom = 'interdit'\nmotif = 'interdit'\n", encoding="utf-8")
+    (tmp_path / ".lintorn" / "config.toml").write_text("[controles]\n# interdit\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'interdit'\n\n[[tool.lintorn.regles]]\nnom = 'interdit'\n"
+        "motif = 'interdit'\n\n[tool.ruff]\nline-length = 99\n", encoding="utf-8")
+    monkeypatch.setattr(config, "DOSSIER_LINTORN", tmp_path / ".lintorn")
+    monkeypatch.setattr(config, "FICHIER_REGLES", tmp_path / ".lintorn" / "regles.toml")
+    _regle(tmp_path, monkeypatch, suffixes=[".toml"])
+
+    resultat = lintorn.controles.projet.regles_maison.controle_regles_maison()
+
+    assert resultat.fichiers == {".lintorn/config.toml": "interdit : 1",
+                                 "pyproject.toml": "interdit : 1"}, resultat.fichiers
+
+
 @pytest.mark.parametrize("sortie", ["rapport-push.md", "rapport-push.html"])
 def test_le_rapport_du_push_n_est_pas_lu_par_les_regles_maison(tmp_path, monkeypatch, sortie):
     """Il cite les fautes qu'il a trouvées : une règle qui le lisait les

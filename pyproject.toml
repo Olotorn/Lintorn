@@ -31,8 +31,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://gitlab.com/DamXs/lintorn"
-Issues = "https://gitlab.com/DamXs/lintorn/-/issues"
+Homepage = "https://gitlab.com/olotorn/lintorn"
+Issues = "https://gitlab.com/olotorn/lintorn/-/issues"
+Changelog = "https://gitlab.com/olotorn/lintorn/-/releases"
+Funding = "https://liberapay.com/Olotorn/donate"
+PayPal = "https://www.paypal.com/donate/?hosted_button_id=XTWSHH5DD3A2C"
 
 [project.scripts]
 lintorn = "lintorn.cli:main"
@@ -40,9 +43,11 @@ lintorn = "lintorn.cli:main"
 [tool.hatch.version]
 path = "src/lintorn/__init__.py"
 
-# Les images du README vivent sur GitLab : inutile de les livrer dans chaque version.
+# Une liste de ce qui part, pas de ce qui reste : hatch suit le .gitignore de .lintorn/
+# (qui ré-autorise config.toml) même quand celui du dépôt écarte le dossier, et tout
+# fichier oublié à la racine partait aussi. Les images du README restent sur GitLab.
 [tool.hatch.build.targets.sdist]
-exclude = ["docs/"]
+only-include = ["src", "tests", "README.md", "GUIDE.md", "CONTRIBUTING.md", "LICENSE"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lintorn"]

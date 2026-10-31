@@ -117,8 +117,16 @@ def lancer(args: list[str], apres_separateur: list[str]) -> int:
                 # Les outils lents ont tourné : on note la date pour que le contrôle
                 # « Audit complet » cesse de réclamer. Écrit APRÈS coup — un audit
                 # interrompu ne doit pas compter comme fait.
-                base.ecrire_etat("dernier_audit_complet",
-                                  datetime.now().isoformat(timespec="seconds"))
+                # Ce qu'ils ont trouvé d'abord, avec sa propre date : si la
+                # date de l'audit ne s'écrit pas, le mode rapide redit des
+                # alertes datées de leur jour, jamais d'un autre.
+                maintenant = datetime.now().isoformat(timespec="seconds")
+                lents = {entree["titre"] for entree in config.COMMANDES if entree["lent"]}
+                base.ecrire_etat(noyau.ALERTES_AUDIT_COMPLET, {
+                    "date": maintenant,
+                    "alertes": {r.titre: r.resume for r in resultats
+                                if r.titre in lents and r.statut == "ALERTE"}})
+                base.ecrire_etat("dernier_audit_complet", maintenant)
                 # Sa ligne a été jugée AVANT : elle disait « jamais lance » sous
                 # l'audit complet qui venait de tourner.
                 a_jour = audit_complet.controle_audit_complet()

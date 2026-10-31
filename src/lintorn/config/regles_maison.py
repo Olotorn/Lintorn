@@ -8,7 +8,48 @@ import re
 from .. import config
 
 _CLES_REGLE = {"source", "nom", "regle", "racine", "suffixes", "exclure",
-               "motif", "motif_requis", "si", "bloquant", "hors_portee"}
+               "motif", "motif_requis", "si", "bloquant", "hors_portee", "exemple"}
+
+
+def _exemples(brute: dict) -> list[str] | None:
+    """Le ou les `exemple` d'une règle : des textes FAUTIFS qu'elle doit attraper. None : mal écrits."""
+    exemple = brute.get("exemple")
+    if exemple is None:
+        return []
+    liste = [exemple] if isinstance(exemple, str) else exemple
+    if isinstance(liste, list) and liste and all(isinstance(x, str) and x for x in liste):
+        return liste
+    return None
+
+
+def rate_son_exemple(regle: dict, exemple: str) -> str:
+    """Pourquoi la règle ne signalerait PAS cet exemple fautif ; vide si elle le signale.
+
+    ⚠️ Une règle morte et une règle tenue disent toutes deux « 0 » : une regex
+    qui ne peut rien attraper (un `\\` en trop, une alternative mal placée) restait
+    verte depuis le jour de son écriture. Son exemple la prend en faute.
+    """
+    if regle["si"] is not None and not regle["si"].search(exemple):
+        return "ne contient pas son `si` : la regle ne le lirait meme pas"
+    trouve = bool(regle["motif"].search(exemple))
+    if regle["requis"] and trouve:
+        return "contient ce que la regle exige : ce n'est pas une faute pour elle"
+    if not regle["requis"] and not trouve:
+        return "n'est pas trouve par son motif"
+    return ""
+
+
+def tables_mal_nommees(texte: str) -> list[tuple[int, str, str, str]]:
+    """(numéro, ligne, ligne corrigée, nom écrit) des en-têtes qui visent `[[regles]]` sans l'écrire.
+
+    `[[regle]]`, `[[Regles]]`, `[[rules]]`, `[[régles]]` (un accent est interdit
+    dans un nom de table : le fichier entier devenait illisible), `[regles]`
+    (une table seule, pas une liste). Le détecteur est celui de `lintorn
+    corrige` (`fautes_de_frappe`) : ce qui est signalé ici est ce qu'il répare.
+    """
+    tables, cles = config._schemas()[config.FICHIER_REGLES]
+    return [(faute.numero, faute.ligne, faute.corrigee, faute.ecrit)
+            for faute in config.fautes_de_frappe(texte, tables, cles) if faute.table]
 
 
 def _regles_brutes() -> list[dict]:
@@ -26,13 +67,31 @@ def _regles_brutes() -> list[dict]:
     amelioration, c'est une punition pour ceux qui ont adopte l'outil tot.
     """
     charge = config._charger_toml(config.FICHIER_REGLES)
+    # La faute dite avec sa ligne et la bonne écriture : « cle inconnue 'regle' »
+    # obligeait à chercher, et `[[régles]]` ne laissait qu'une erreur de TOML.
+    try:
+        mal_nommees = config.tables_mal_nommees(config.FICHIER_REGLES.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        mal_nommees = []
+    nom = config.FICHIER_REGLES.name
+    for numero, ligne, corrigee, _ in mal_nommees:
+        config.SOUCIS_CONFIG.append(
+            f"{nom}, ligne {numero} : {ligne.strip()} n'est pas lu - ecris {corrigee.strip()}"
+            " (`lintorn corrige` le fait)")
+    expliquees = {ecrit for _, _, _, ecrit in mal_nommees}
     if isinstance(charge, dict):
         # Compté même s'il ne déclare aucune règle : « regles.toml lu,
         # 0 regle chargee » est une information, pas un silence.
-        config._retenu(config.FICHIER_REGLES.name)
+        config._retenu(nom)
+        # Seul `regles` est lu : une `[[regle]]` ou une `[[rules]]` disparaissait
+        # sans un mot, et le push fautif partait sur « Lintorn OK ».
+        config.SOUCIS_CONFIG.extend(config._cles_inconnues(
+            {cle: valeur for cle, valeur in charge.items() if cle not in expliquees},
+            {"regles"}, nom))
     dediees = charge.get("regles", []) if isinstance(charge, dict) else []
     if not isinstance(dediees, list):
-        config.SOUCIS_CONFIG.append("regles.toml : `regles` doit etre une liste de [[regles]] - ignore")
+        if "regles" not in expliquees:
+            config.SOUCIS_CONFIG.append(f"{nom} : `regles` doit etre une liste de [[regles]] - ignore")
         dediees = []
     heritees = config.PROJET.get("regles", [])
     toutes = [*dediees, *heritees]
@@ -106,13 +165,19 @@ def _regles_du_projet() -> tuple[list[dict], list[dict]]:
                           "`motif_requis` (obligatoire) ou `hors_portee`")
             continue
 
+        exemples = _exemples(brute)
+        if exemples is None:
+            soucis.append(f"{nom} : `exemple` doit etre un texte, ou une liste de textes - ignore")
+            exemples = []
         if hors:
+            if exemples:
+                soucis.append(f"{nom} : `exemple` sans motif - une regle hors_portee n'a rien a tester")
             # Pas une règle à appliquer : une DÉCISION motivée, sur une règle
             # que Lintorn ne sait pas exprimer. `source` est obligatoire —
             # sans lui la décision ne désigne rien et ne couvre donc rien.
             if not brute.get("source"):
                 soucis.append(f"{nom} : `hors_portee` exige `source` "
-                              '(ex. source = "CLAUDE.md:50")')
+                              '(ex. source = "CLAUDE.md#debut de la phrase de la regle")')
                 continue
             hors_portee.append({
                 "nom": nom,
@@ -177,6 +242,7 @@ def _regles_du_projet() -> tuple[list[dict], list[dict]]:
         regles.append({
             "nom": nom,
             # Le LIEN vers la ligne de doc qui enonce la regle, ex.
+            # « CLAUDE.md#Zéro dépendance » (le début de sa phrase) ou
             # « CLAUDE.md:23 ». Facultatif, mais c'est lui qui rend la
             # couverture EXACTE au lieu d'heuristique — et qui evite de
             # recopier la phrase ici, donc de la laisser deriver.
@@ -195,7 +261,15 @@ def _regles_du_projet() -> tuple[list[dict], list[dict]]:
             "ou": reperes.get(nom, (None, None)),
             "exclure": tuple(brute.get("exclure", ())),
             "bloquant": bool(brute.get("bloquant", False)),
+            "exemples": tuple(exemples),
         })
+        # Vérifié à CHAQUE lancement, pas seulement par `lintorn regles --test` :
+        # une règle qui ne trouve pas son propre exemple ne protège peut-être rien.
+        for numero, exemple in enumerate(exemples, 1):
+            raison = config.rate_son_exemple(regles[-1], exemple)
+            if raison:
+                quel = f"son exemple {numero}" if len(exemples) > 1 else "son exemple"
+                soucis.append(f"{nom} : {quel} {raison} - la regle ne protege peut-etre rien")
 
     config.SOUCIS_CONFIG.extend(soucis)
     return regles, hors_portee

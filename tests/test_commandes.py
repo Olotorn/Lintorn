@@ -185,3 +185,35 @@ def test_aucun_texte_ne_donne_un_ancien_nom_de_commande():
 
     assert not fautifs
 
+
+
+def _outils_d_un_projet_rust(tmp_path, monkeypatch, controles):
+    """Un projet Rust avec osv-scanner installé : seul OSV s'y applique."""
+    (tmp_path / "Cargo.lock").write_text("", encoding="utf-8")
+    monkeypatch.setattr(config, "RACINE", tmp_path)
+    monkeypatch.setattr(config, "PY_RACINE", None)
+    monkeypatch.setattr(config, "BACKEND", None)
+    monkeypatch.setattr(config, "FRONTEND", None)
+    monkeypatch.setattr(config, "PROJETS_TS", [])
+    monkeypatch.setattr(config, "ECOSYSTEMES_OSV", {"Rust": [tmp_path / "Cargo.lock"]})
+    monkeypatch.setattr(config, "PROJET", {"controles": controles})
+    monkeypatch.setattr(outils.shutil, "which", lambda nom: f"/bin/{nom}")
+    monkeypatch.setattr(outils, "_oui", lambda question: False)
+
+
+def test_lintorn_outils_dit_comment_lancer_ce_qui_est_actif(tmp_path, monkeypatch, capsys):
+    """Activer ne lance rien : sans la commande à taper, on croyait que seul
+    pip-audit, qui a la sienne, pouvait tourner."""
+    _outils_d_un_projet_rust(tmp_path, monkeypatch, {"failles_osv": True})
+
+    assert outils.installer_outils() == 0
+
+    assert "Pour les lancer : lintorn (l'audit complet)" in capsys.readouterr().out
+
+
+def test_lintorn_outils_ne_dit_pas_comment_lancer_ce_qui_est_inactif(tmp_path, monkeypatch, capsys):
+    _outils_d_un_projet_rust(tmp_path, monkeypatch, {})
+
+    outils.installer_outils()
+
+    assert "Pour les lancer" not in capsys.readouterr().out

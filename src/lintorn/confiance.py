@@ -175,6 +175,23 @@ def enregistrer(entrees: list[dict]) -> str | None:
     liste = list(liste) if isinstance(liste, list) else []
     liste += [i for i in map(identite, entrees) if i not in liste]
     tout[_cle_projet()] = liste
+    return _ecrire(tout)
+
+
+def retirer() -> tuple[int, str | None]:
+    """Retire tout ce qui a été accordé à CE projet : (combien, pourquoi ça n'a pas pu se faire).
+
+    Les autres projets gardent leur accord. La prochaine commande à lancer
+    redemandera, comme la première fois.
+    """
+    tout = _lire()
+    retire = tout.pop(_cle_projet(), None)
+    if retire is None:
+        return 0, None
+    return (len(retire) if isinstance(retire, list) else 1), _ecrire(tout)
+
+
+def _ecrire(tout: dict) -> str | None:
     cible = fichier()
     try:
         cible.parent.mkdir(parents=True, exist_ok=True)

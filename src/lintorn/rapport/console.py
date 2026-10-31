@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from .. import __version__, chemins, config
+from .. import __version__, chemins, config, noyau
 from ..base import MARQUEUR, Resultat
 from ..controles import outillage
 from ..controles.outillage import configuration
@@ -28,8 +28,10 @@ def signaler_non_bloquants(resultats: list[Resultat]) -> int:
     Le rapport disait vrai, le resume le dementait. C'est la meme panne que
     partout ailleurs ici, au dernier etage.
     """
+    # Un rappel du dernier audit complet aussi : ses failles n'ont pas cessé
+    # d'exister parce que le mode rapide ne les a pas recherchées.
     signales = [r for r in resultats
-                if r.statut in ("ALERTE", "ERREUR") and not r.bloquant]
+                if (r.statut in ("ALERTE", "ERREUR") and not r.bloquant) or r.rappel]
     if not signales:
         return 0
 
@@ -51,7 +53,7 @@ def outils_muets(resultats: list[Resultat]) -> list[Resultat]:
     outils = {entree["titre"] for entree in config.COMMANDES}
     return [r for r in resultats
             if r.statut == "INDISPONIBLE" and r.titre in outils
-            and not r.resume.startswith("NON EXECUTE (mode --rapide)")]
+            and not r.resume.startswith(noyau.NON_EXECUTE_RAPIDE)]
 
 
 # Pour le hook seulement : rien ne bloque, mais ce push n'a pas été vérifié en
@@ -108,6 +110,16 @@ def afficher(resultats: list[Resultat], rapport_ecrit: bool, manque_config: bool
     print(f"\n=== Lintorn {__version__} - RAPPORT AUDIT ===")
     for r in resultats:
         print(f"{MARQUEUR[r.statut]} {r.titre:<34} {r.resume}")
+        # « 1 consigne(s) NON CHARGEE(S) » ne disait pas laquelle : il fallait
+        # ouvrir le rapport pour lire « [[regle]] n'est pas lu - ecris [[regles]] ».
+        if r.titre == configuration.TITRE and r.statut == "ALERTE":
+            for souci in config.SOUCIS_CONFIG[:3]:
+                print(f"       {souci}")
+            if len(config.SOUCIS_CONFIG) > 3:
+                print(f"       ... et {len(config.SOUCIS_CONFIG) - 3} autre(s) dans le rapport")
+            fautes = sum(len(liste) for _, liste in config.fautes_des_fichiers())
+            if fautes:
+                print(f"       {fautes} faute(s) de frappe : lintorn corrige les repare, sur un oui")
 
     if rapport_ecrit:
         # `_relatif` et pas `relative_to` : une sortie rangee ailleurs que sous

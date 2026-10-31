@@ -26,9 +26,11 @@ def maj_securite(appliquer: bool) -> int:
     """
 
     racine = config.BACKEND or config.PY_RACINE
+    # Rien à mettre à jour n'est pas un échec : le code 1 faisait tomber le
+    # script qui l'enchaîne. Le message dit qu'il n'y avait rien à vérifier.
     if racine is None:
         print("Aucun code Python dans ce projet : pip-audit n'a rien a mettre a jour.")
-        return 1
+        return 0
 
     # ⚠️ Cette commande lance le python du projet et, avec `--appliquer`, y
     # INSTALLE des paquets : mêmes gardes que l'audit (pas de venv du projet =

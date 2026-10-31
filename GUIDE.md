@@ -41,7 +41,7 @@ $ lintorn
 
 Je ne vends rien. C'est un outil écrit pour mon propre usage, publié parce qu'il peut servir à
 des développeurs comme moi. Si la détection déraille chez toi, ouvre un ticket (*issue*) sur
-[GitLab](https://gitlab.com/DamXs/lintorn/-/issues) : c'est ce qui fait avancer le projet.
+[GitLab](https://gitlab.com/olotorn/lintorn/-/issues) : c'est ce qui fait avancer le projet.
 
 Lintorn demande Python 3.11 ou plus récent.
 
@@ -69,6 +69,8 @@ Lintorn ne te laisse jamais croire qu'une chose a été vérifiée quand elle ne
 - un outil **non installé** est annoncé indisponible, jamais « 0 problème trouvé » ;
 - une règle dont le dossier cible n'existe pas est **écartée**, pas rapportée comme tenue ;
 - une règle qui n'a lu **aucun fichier** le dit, au lieu de compter comme respectée ;
+- une règle qui ne trouve pas son propre **exemple** le dit : sans lui, une règle au motif mal
+  écrit et une règle respectée affichent toutes deux « 0 » ;
 - **aucune** règle déclarée est annoncé comme tel, au lieu de « toutes les règles sont tenues » ;
 - son propre hook git est vérifié jusqu'au **bit exécutable** : git ignore un hook non
   exécutable sans aucun message.
@@ -120,7 +122,7 @@ non couverte, tout rempli sauf le motif :
 
 ```toml
 # [[regles]]
-# source   = "CLAUDE.md:23"   # la regle est ENONCEE la-bas, pas ici
+# source   = "CLAUDE.md#Axios partage"   # la regle est ENONCEE la-bas, pas ici
 # nom      = "Axios partage"
 # racine   = "."
 # suffixes = [".ts", ".tsx"]
@@ -128,7 +130,10 @@ non couverte, tout rempli sauf le motif :
 # bloquant = false
 ```
 
-`source` désigne la ligne où la règle est énoncée : la phrase reste écrite à un seul endroit.
+`source` désigne la règle de la doc par le début de sa phrase : la phrase reste écrite à un seul
+endroit, et écrire au-dessus ne décale rien. Si la phrase change, ou si ce texte se trouve dans
+deux règles, Lintorn le dit. L'ancienne écriture par numéro de ligne (CLAUDE.md:23) reste
+comprise, mais elle se périme dès qu'une ligne s'ajoute plus haut.
 Ce contrôle ne bloque jamais un push.
 
 ## Les documents qui citent ce qui n'existe pas
@@ -173,6 +178,10 @@ Sans terminal pour répondre (le hook lancé par VS Code, la CI), il ne lance ri
 le hook termine par « Push autorisé SANS vérification complète ». `lintorn confiance`, une fois
 dans un terminal, donne l'accord. En CI, `LINTORN_CONFIANCE=oui` l'accorde d'office.
 
+`lintorn status` te montre ce qui est accordé dans ce projet, et ce qui attend encore ton
+accord. Pour le retirer : `lintorn confiance --rm`. Les autres projets gardent le leur, et
+Lintorn te redemandera avant de lancer quoi que ce soit ici.
+
 ### Ce qui est opt-in
 
 Ceux-là sont **opt-in** : `tests` (exécute ton code), `django_check` et `migrations`
@@ -184,15 +193,18 @@ Le contrôle `Configuration (Lintorn)` liste ceux qui s'appliquent à ton projet
 pas encore accordés. Il signale aussi une clé mal tapée, une clé activée sur un projet qui n'a
 rien à lui faire contrôler (`failles_npm` sans package-lock.json), et une valeur du mauvais
 type. Seuls `true` et `false` valent accord : `tests = "false"`, écrit entre guillemets,
-n'active rien.
+n'active rien. Une faute de frappe sûre, `lintorn corrige` la répare (voir
+[Configuration](#configuration)).
 
 ### Ce que Lintorn écrit
 
 Sans que tu le demandes, Lintorn n'écrit que dans le `.lintorn/` de ton projet, et jamais à
 travers un lien symbolique, fichier **ou dossier**. Les commandes qui écrivent ailleurs le
 disent et te le demandent : `lintorn outils` (ta configuration, jusque dans `pyproject.toml`
-si elle y vit), `lintorn pip-audit --appliquer` (`requirements.txt`) et `lintorn hook` (le
-`core.hooksPath` de ce clone).
+si elle y vit), `lintorn pip-audit --appliquer` (`requirements.txt`), `lintorn hook` et
+`lintorn hook --rm` (le `core.hooksPath` de ce clone), et `lintorn corrige` (tes `regles.toml`
+et `config.toml`, seulement sur un « o »). `lintorn confiance` et `lintorn confiance --rm`
+écrivent ton accord, hors du projet.
 
 Il ne télécharge pas `tsc` : il utilise celui de ton projet, installé par `npm install`.
 
@@ -207,7 +219,12 @@ chose.
 | `.lintorn/rapport.md` et `.lintorn/rapport.html` | tes commandes (`lintorn`, `lintorn rapide`, `lintorn doc`…) | ta prochaine commande |
 | `.lintorn/rapport-push.md` et `.lintorn/rapport-push.html` | le hook, à chaque push | ton prochain push |
 
-La première ligne de chaque rapport dit d'où il vient : « pendant un push » ou « hors push ».
+L'en-tête de chaque rapport dit d'où il vient : « pendant un push » ou « hors push ».
+
+`lintorn rapport` ouvre le dernier dans ton navigateur, `lintorn rapport-push` celui de ton
+dernier push. Un rapport versionné dans le dépôt n'est pas ouvert : il n'a pas été écrit par
+Lintorn sur ta machine, et un dépôt piégé pourrait y mettre un faux rapport tout vert.
+`lintorn status` donne la date de chacun, et ce qu'il a trouvé.
 
 ## Configuration
 
@@ -220,6 +237,14 @@ La première ligne de chaque rapport dit d'où il vient : « pendant un push » 
 
 Les réglages peuvent aussi vivre sous `[tool.lintorn]` dans ton `pyproject.toml`. Des règles
 écrites dans ta configuration et dans `regles.toml` s'additionnent.
+
+Une faute de frappe ne passe pas en silence : `[[regle]]` au lieu de `[[regles]]`, `bloquan` au
+lieu de `bloquant`, `[controle]` au lieu de `[controles]`. La ligne `Configuration (Lintorn)` la
+nomme dans le terminal, avec la bonne écriture, et le push finit « SANS vérification
+complète ». `lintorn corrige` répare ces fautes dans `regles.toml` et `config.toml` : il te
+montre chaque correction, et ne touche à rien sans ton « o ». Il ne corrige que ce qui est sûr :
+`[[hors_portee]]` n'est pas une faute de `[[regles]]`, et `regex` n'est pas une faute de `regle`.
+Le reste se corrige à la main.
 
 ```toml
 [controles]
@@ -259,6 +284,32 @@ Une règle conditionnelle dont le `si` n'a jamais été trouvé n'a rien vérifi
 comptée comme tenue, et le rapport dit combien sont restées inertes, avec un lien vers leur
 ligne dans `regles.toml`.
 
+### Prouver qu'une règle marche : `exemple`
+
+Une règle au motif mal écrit ne trouve jamais rien. Dans le rapport, elle ressemble alors à
+une règle respectée : les deux disent « 0 ». Donne-lui un `exemple`, un texte **fautif**
+qu'elle doit attraper :
+
+```toml
+[[regles]]
+nom      = "Pas de print() oublie"
+racine   = "src"
+suffixes = [".py"]
+motif    = '^\s*print\('
+exemple  = 'print("debug")'
+bloquant = true
+```
+
+Lintorn vérifie l'exemple à chaque lancement. S'il n'est pas attrapé, la ligne
+`Configuration (Lintorn)` passe au rouge, et le push finit « SANS vérification complète ».
+Pour une règle `motif_requis`, l'exemple est un texte où ce qui est exigé **manque** ; si la
+règle a un `si`, l'exemple doit le contenir. Plusieurs exemples : `exemple = ['...', '...']`.
+
+`lintorn regles --test` essaie chaque règle, une par une : combien de fichiers elle lit, ce
+qu'elle trouve, et si elle attrape son exemple. Il sort en code 1 quand une règle ne protège
+rien : elle ne lit aucun fichier, son motif ne rend pas la main, ou elle rate son exemple. Une
+règle sans exemple est signalée, sans faire échouer.
+
 ### Quand aucun motif ne peut exprimer la règle
 
 Certaines règles dépassent une expression régulière : comparer deux fichiers, vérifier une
@@ -267,7 +318,7 @@ Déclare-la **hors de portée**, avec sa raison :
 
 ```toml
 [[regles]]
-source      = "CLAUDE.md:50"
+source      = "CLAUDE.md#Versions"
 nom         = "Versions"
 hors_portee = """
 Comparer DEUX fichiers depasse un motif, qui lit un fichier a la fois.
@@ -282,6 +333,9 @@ Trois garde-fous l'accompagnent :
 - **si la raison cite un `test_...`, Lintorn vérifie qu'il existe.** Test renommé ou supprimé :
   la règle redevient visible, et le rapport dit laquelle ;
 - **le compte reste affiché** : `7 enoncee(s), 2 controlee(s), 5 hors de portee`.
+
+`lintorn regles` prépare ces blocs avec le reste : `source` et `nom` sont remplis, une ligne
+`motif` et une ligne `hors_portee` attendent. Décommente le bloc et remplis l'une des deux.
 
 Les commandes personnalisées sont **exécutées**, avec le même contrat que les scripts npm, les
 hooks git ou un Makefile. Ne lance pas Lintorn dans un dépôt en qui tu n'as pas confiance.
@@ -337,6 +391,11 @@ pip-audit sans Python, pas de npm audit sans verrou npm. Deux gestes, deux accor
 Ce qu'il ne sait pas installer lui-même, il le dit, avec la commande : `npm install` pour
 `tsc`, Node.js pour npm audit, Homebrew ou le site d'OSV-Scanner pour ce dernier.
 
+Activer ne lance rien sur le moment : ce qui est actif tourne à chaque `lintorn`, l'audit
+complet. `lintorn rapide`, et donc le hook, saute les plus lents, mais redit ce qu'ils avaient
+trouvé au dernier audit complet : une faille connue ne disparaît pas du verdict parce qu'on ne
+l'a pas recherchée aujourd'hui.
+
 Le contrôle `Dependances vs venv` compare `requirements.txt` à ce qui est installé. Une ligne
 avec une version exacte (`django==5.0`) est comparée à la version installée ; une ligne sans
 (`django>=5`, `django`) dit seulement que le paquet doit être là. Le fichier peut être complet
@@ -373,22 +432,31 @@ rien. Dans un dépôt git, cette limite n'existe pas. `lintorn version`, `lintor
 ## Les commandes
 
 ```console
-lintorn                      audit complet
+lintorn                      audit complet : ta doc et tous les outils actifs
 lintorn rapide               saute les outils lents (ce que lance le hook pre-push)
 lintorn doc                  le controle de documentation seul
+lintorn status               ou en est Lintorn dans ce projet, sans rien lancer ni ecrire
+lintorn rapport              ouvre le dernier rapport dans ton navigateur
+lintorn rapport-push         ouvre celui de ton dernier push
 lintorn init                 genere la config de ce projet
 lintorn regles               esquisse un bloc [[regles]] par regle non couverte
-lintorn hook                 installe le hook pre-push (sans faire taire tes hooks existants)
+lintorn regles --test        essaie chaque regle, et son exemple
+lintorn corrige              repare les fautes de frappe de regles.toml et config.toml, sur un oui
+lintorn hook                 installe ou met a jour le hook pre-push, et dit ce qu'il a change
+lintorn hook --status        dit si le hook tourne, sans rien toucher
+lintorn hook --rm            debranche le hook et retire sa copie
 lintorn confiance            autorise Lintorn a lancer ses outils dans ce projet
+lintorn confiance --rm       retire cet accord, pour ce projet seulement
 lintorn outils               installe et active ce qui s'applique a ce projet, en demandant
-lintorn pip-audit            ce que propose pip-audit (a blanc)
+lintorn pip-audit            repare : les paquets Python que pip-audit signale (a blanc)
 lintorn guide                la notice en une page : a quoi il sert, comment lire un rapport
 lintorn version              la version installee
-lintorn help                 l'aide
+lintorn help                 toutes les commandes
 ```
 
 Une option mal tapée n'est jamais ignorée : Lintorn s'arrête, ne lance rien, et propose
-l'option la plus proche.
+l'option la plus proche. Une précision sans sa commande non plus : `lintorn --rm` seul te dit
+qu'il va avec `lintorn hook` ou `lintorn confiance`.
 
 ## Un dépôt, plusieurs projets
 
@@ -440,9 +508,19 @@ contrôle `Hook pre-push` signale ensuite le push parti malgré son refus.
 
 Avec pre-commit, lefthook ou simple-git-hooks, pas de ligne : ces outils réécrivent leurs
 scripts à chaque installation. `lintorn hook` te donne alors le bloc à mettre dans **leur**
-config, et la commande à relancer. Copie-le en entier : `use_stdin: true` (lefthook) transmet
-à Lintorn ce que tu pousses, et `verbose: true` (pre-commit) affiche ce qu'il dit même quand il
-laisse passer. Le contrôle `Hook pre-push` te prévient si `verbose: true` manque.
+config, et la commande à relancer. Copie-le en entier : `verbose: true` (pre-commit) affiche ce
+que dit Lintorn même quand il laisse passer, et `use_stdin: true` (lefthook) lui transmet ce que
+tu pousses.
+
+Avec lefthook, le bloc lance Lintorn par un petit script, .lefthook/pre-push/lintorn.sh dans ton projet, que
+`lintorn hook` te donne aussi. Lancé par une commande (`run:`), lefthook le sautait dès qu'il ne
+voyait aucun fichier à pousser (une branche où tu n'es pas, un tag), et le push partait sans
+lui. Le contrôle `Hook pre-push` te prévient si ton bloc lance encore Lintorn par une commande,
+ou si `verbose: true` manque à celui de pre-commit.
+
+Avec pre-commit, pousse une branche à la fois : il ne transmet à Lintorn que la première d'un
+push qui en envoie plusieurs. Le contrôle `Hook pre-push` signale ensuite celles qui sont
+parties sans lui.
 
 Sous Windows, pre-commit ne laisse pas Lintorn accéder au terminal : il ne peut pas te
 demander s'il faut pousser quand même, et refuse le push si un contrôle bloquant est au
@@ -454,7 +532,10 @@ et le contrôle `Hook pre-push` te le rappelle tant qu'ils sont là.
 ### Vérifier qu'il tourne
 
 Après l'installation, **pousse une fois**. Le contrôle `Hook pre-push` passe au vert quand il
-a **vu** Lintorn tourner pendant un push.
+a **vu** Lintorn tourner pendant un push. `lintorn hook --status` te donne ce verdict sans rien
+toucher (code 0 seulement au vert, pratique dans un script). Et `lintorn hook` relancé dit ce
+qu'il a trouvé : « Hook installe », « Hook mis a jour » (et à la place de quelle version), ou
+« Hook deja a jour » et « Rien a changer ».
 
 Sur un autre clone, relance `lintorn hook` : le script n'est pas versionné, et sans lui ton
 push s'arrête sur « not found ». Pareil dans un **worktree** (ceux que Claude Code crée pour
@@ -466,6 +547,13 @@ aucune trace lui échappe : un push vers une adresse plutôt que vers le nom d'u
 (git push https://… au lieu de git push origin), ou le push de Gerrit vers refs/for/main. Le
 contrôle affiche alors le dernier push qu'il a vu. Si git ne tient plus ce journal
 (`core.logAllRefUpdates = false`), le contrôle le dit.
+
+### Retirer le hook
+
+`lintorn hook --rm` débranche le hook (`core.hooksPath`) et retire sa copie de
+`.lintorn/hooks/`. Si `lintorn hook --force` avait remplacé tes anciens hooks, il les remet en
+service. Si c'est le pre-push d'un autre outil qui appelle Lintorn, il ne touche pas à ce
+fichier : il te dit d'en retirer l'appel, sinon ton prochain push s'arrêterait sur « not found ».
 
 ### Ce que le hook dit au push
 
@@ -481,7 +569,9 @@ autorisé SANS vérification complète », avec la raison juste au-dessus :
   suffit à retirer toutes tes règles maison, et Lintorn te dit quelle ligne ;
 - aucun des fichiers que tu pousses n'est lu par un contrôle (une feuille de style, une image,
   poussées seules). Si une partie seulement n'est pas lue, le push garde son « Lintorn OK » :
-  la ligne « Defauts dans les fichiers pousses » nomme ce que rien ne lit ;
+  la ligne « Defauts dans les fichiers pousses » nomme ce que rien ne lit. La version d'un
+  sous-module, poussée seule, garde aussi son « Lintorn OK » : son code se vérifie dans son
+  propre dépôt ;
 - Lintorn ne sait pas ce que tu pousses : la copie du hook date d'une version précédente
   (relance `lintorn hook`), ou l'outil qui l'appelle ne lui transmet pas ce que git envoie ;
 - ce que tu pousses n'est pas ce qu'il y a sur ton disque.

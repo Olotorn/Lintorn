@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import NamedTuple
 
 from ... import config
 from ...base import Resultat, lien
@@ -68,8 +70,9 @@ def _fichiers_sous(racine: Path, index: dict, illisibles: set[str]) -> list[Path
     13 s pour 20 règles sur un node_modules de 60 000 fichiers.
     ⚠️ Les SORTIES de Lintorn sont écartées — le rapport cite le code fautif,
     et une règle y comptait ses propres citations, un peu plus à chaque
-    passage. Mais PAS le reste de `.lintorn/` : config.toml et regles.toml se
-    versionnent, une règle doit pouvoir les lire.
+    passage. regles.toml aussi : il n'est fait que des motifs que les règles
+    cherchent, et une règle au motif littéral s'y trouvait elle-même. Mais
+    PAS config.toml : il se versionne, une règle doit pouvoir le lire.
 
     ⚠️ `os.walk` saute EN SILENCE un dossier qu'il ne peut pas lister : ses
     fichiers échappaient à toutes les règles, sans un mot. `onerror` les
@@ -81,7 +84,7 @@ def _fichiers_sous(racine: Path, index: dict, illisibles: set[str]) -> list[Path
                        if chemin.is_relative_to(config.RACINE) else str(chemin))
 
     if racine not in index:
-        sorties = config.sorties_de_lintorn()
+        sorties = config.sorties_de_lintorn() | {config.FICHIER_REGLES}
         trouves = []
         for dossier, sous_dossiers, noms in os.walk(racine, onerror=_dossier_illisible):
             sous_dossiers[:] = [nom for nom in sous_dossiers if nom not in config.IGNORES]
@@ -89,6 +92,103 @@ def _fichiers_sous(racine: Path, index: dict, illisibles: set[str]) -> list[Path
                         if chemin not in sorties and chemin.is_file()]
         index[racine] = trouves
     return index[racine]
+
+
+_RX_TABLE = re.compile(r"^\s*\[")
+_RX_TABLE_DE_REGLES = re.compile(r"^\s*\[\[\s*(?:tool\.lintorn\.)?regles\s*\]\]")
+
+
+def _sans_les_regles(texte: str) -> str:
+    """Le texte d'un config.toml ou d'un pyproject.toml, sans ses tables `[[regles]]`.
+
+    Une règle au motif littéral s'y trouvait elle-même, dans sa propre
+    définition. Les lignes restent, vides : le reste du fichier se lit tel quel.
+    """
+    lignes, dedans = [], False
+    for ligne in texte.splitlines(keepends=True):
+        if _RX_TABLE.match(ligne):
+            dedans = bool(_RX_TABLE_DE_REGLES.match(ligne))
+        lignes.append("\n" if dedans else ligne)
+    return "".join(lignes)
+
+
+class Jugement(NamedTuple):
+    """Ce qu'UNE règle a trouvé : le même pour le contrôle et pour `lintorn regles --test`."""
+    par_fichier: dict[str, int]   # {fichier: occurrences, ou 1 quand ce qu'elle exige y manque}
+    lus: int                      # fichiers vraiment ouverts
+    applicables: int              # ceux qu'elle juge : tous, ou ceux qui contiennent son `si`
+    illisibles_ici: int           # ceux qu'elle n'a pas pu ouvrir
+    abandon: str                  # pourquoi elle a été abandonnée (motif trop lent), vide sinon
+
+
+def juger(regle: dict, index: dict, illisibles: set[str], fichiers_lus: set[str]) -> Jugement:
+    """Fait tourner une règle sur ses fichiers. `index`, `illisibles`, `fichiers_lus` se partagent."""
+    par_fichier: dict[str, int] = {}
+    lus = 0
+    # Fichiers auxquels la règle s'APPLIQUE vraiment. Sans `si`, c'est
+    # tous ceux qu'elle a lus ; avec, seulement ceux qui le contiennent.
+    applicables = 0
+    # Les fichiers qui peuvent porter des `[[regles]]`, à côté de regles.toml.
+    porteurs = {config.DOSSIER_LINTORN / "config.toml", config.RACINE / "pyproject.toml"}
+
+    # On rassemble d'abord, on filtre ensuite : `hors_gitignore` interroge
+    # git UNE fois pour toute la liste, au lieu d'un processus par fichier.
+    candidats = [chemin for chemin in _fichiers_sous(regle["racine"], index, illisibles)
+                 if chemin.suffix in regle["suffixes"]]
+    illisibles_ici = 0
+    debut = time.monotonic()
+
+    for chemin in config.hors_gitignore(candidats):
+        relatif = chemin.relative_to(config.RACINE).as_posix()
+        if any(exclu in relatif for exclu in regle["exclure"]):
+            continue
+
+        if time.monotonic() - debut > SECONDES_PAR_REGLE:
+            return Jugement(par_fichier, lus, applicables, illisibles_ici,
+                            f"son motif est trop lent : plus de {SECONDES_PAR_REGLE:g} s "
+                            f"sur {lus} fichier(s) : regle abandonnee")
+
+        # `errors="replace"` couvre un contenu mal encodé, pas un fichier
+        # qu'on n'OUVRE pas (droits, fichier d'un autre utilisateur) : il
+        # faisait tomber tout le rapport. Il n'est donc PAS compté parmi
+        # les lus — et il est nommé plus bas.
+        try:
+            texte = chemin.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            illisibles.add(relatif)
+            illisibles_ici += 1
+            continue
+        if chemin in porteurs:
+            texte = _sans_les_regles(texte)
+
+        # Compté ICI et pas sur `candidats` : un fichier écarté par
+        # `exclure` ou par git n'a jamais été ouvert.
+        lus += 1
+        fichiers_lus.add(relatif)
+
+        try:
+            with _chrono(SECONDES_PAR_FICHIER):
+                # `si` absent → la règle vaut pour tout fichier lu. Présent,
+                # elle ne juge que ceux qui le contiennent : les autres ne
+                # sont pas « conformes », elle ne les concerne pas.
+                concerne = regle["si"] is None or bool(regle["si"].search(texte))
+                if not concerne:
+                    nb = 0
+                elif regle["requis"]:
+                    # Un manque ne se compte pas en occurrences : c'est
+                    # présent ou absent. Un fichier fautif pèse 1.
+                    nb = 0 if regle["motif"].search(texte) else 1
+                else:
+                    nb = len(regle["motif"].findall(texte))
+        except _MotifTropLent:
+            return Jugement(par_fichier, lus, applicables, illisibles_ici,
+                            f"son motif ne rend pas la main sur `{relatif}` "
+                            f"(plus de {SECONDES_PAR_FICHIER:g} s) : regle abandonnee")
+        if concerne:
+            applicables += 1
+        if nb:
+            par_fichier[relatif] = nb
+    return Jugement(par_fichier, lus, applicables, illisibles_ici, "")
 
 
 def controle_regles_maison() -> Resultat:
@@ -126,76 +226,12 @@ def controle_regles_maison() -> Resultat:
     index: dict = {}
 
     for regle in config.REGLES_MAISON:
-        par_fichier: dict[str, int] = {}
-        lus = 0
-        # Fichiers auxquels la règle s'APPLIQUE vraiment. Sans `si`, c'est
-        # tous ceux qu'elle a lus ; avec, seulement ceux qui le contiennent.
-        applicables = 0
-
-        # On rassemble d'abord, on filtre ensuite : `hors_gitignore` interroge
-        # git UNE fois pour toute la liste, au lieu d'un processus par fichier.
-        candidats = [chemin for chemin in _fichiers_sous(regle["racine"], index, illisibles)
-                     if chemin.suffix in regle["suffixes"]]
-        trop_lent = False
-        illisibles_ici = 0
-        debut = time.monotonic()
-
-        for chemin in config.hors_gitignore(candidats):
-            relatif = chemin.relative_to(config.RACINE).as_posix()
-            if any(exclu in relatif for exclu in regle["exclure"]):
-                continue
-
-            if time.monotonic() - debut > SECONDES_PAR_REGLE:
-                abandonnees.append(
-                    f"{_ou_est_ecrite(regle)}<br>son motif est trop lent : plus de "
-                    f"{SECONDES_PAR_REGLE:g} s sur {lus} fichier(s) : regle abandonnee")
-                trop_lent = True
-                break
-
-            # `errors="replace"` couvre un contenu mal encodé, pas un fichier
-            # qu'on n'OUVRE pas (droits, fichier d'un autre utilisateur) : il
-            # faisait tomber tout le rapport. Il n'est donc PAS compté parmi
-            # les lus — et il est nommé plus bas.
-            try:
-                texte = chemin.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                illisibles.add(relatif)
-                illisibles_ici += 1
-                continue
-
-            # Compté ICI et pas sur `candidats` : un fichier écarté par
-            # `exclure` ou par git n'a jamais été ouvert.
-            lus += 1
-            fichiers_lus.add(relatif)
-
-            try:
-                with _chrono(SECONDES_PAR_FICHIER):
-                    # `si` absent → la règle vaut pour tout fichier lu. Présent,
-                    # elle ne juge que ceux qui le contiennent : les autres ne
-                    # sont pas « conformes », elle ne les concerne pas.
-                    concerne = regle["si"] is None or bool(regle["si"].search(texte))
-                    if not concerne:
-                        nb = 0
-                    elif regle["requis"]:
-                        # Un manque ne se compte pas en occurrences : c'est
-                        # présent ou absent. Un fichier fautif pèse 1.
-                        nb = 0 if regle["motif"].search(texte) else 1
-                    else:
-                        nb = len(regle["motif"].findall(texte))
-            except _MotifTropLent:
-                abandonnees.append(
-                    f"{_ou_est_ecrite(regle)}<br>son motif ne rend pas la main sur "
-                    f"`{relatif}` (plus de {SECONDES_PAR_FICHIER:g} s) : regle abandonnee")
-                trop_lent = True
-                break
-            if concerne:
-                applicables += 1
-            if nb:
-                par_fichier[relatif] = nb
-
+        jugement = juger(regle, index, illisibles, fichiers_lus)
         # Une règle abandonnée n'a PAS de verdict : ni tenue, ni en infraction.
-        if trop_lent:
+        if jugement.abandon:
+            abandonnees.append(f"{_ou_est_ecrite(regle)}<br>{jugement.abandon}")
             continue
+        par_fichier, lus, applicables, illisibles_ici, _ = jugement
 
         if not lus:
             suffixes = ", ".join(regle["suffixes"]) or "(aucun suffixe declare)"

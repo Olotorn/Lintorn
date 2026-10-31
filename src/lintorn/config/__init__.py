@@ -58,6 +58,11 @@ from .ecosystemes import (
     remede_js as remede_js,
     tsc_de as tsc_de,
 )
+from .fautes import (
+    _schemas as _schemas,
+    fautes_de_frappe as fautes_de_frappe,
+    fautes_des_fichiers as fautes_des_fichiers,
+)
 from .projet import (
     IGNORES as IGNORES,
     LIMITE_HORS_GIT as LIMITE_HORS_GIT,
@@ -99,6 +104,8 @@ from .regles_maison import (
     _lignes_des_regles as _lignes_des_regles,
     _regles_brutes as _regles_brutes,
     _regles_du_projet as _regles_du_projet,
+    rate_son_exemple as rate_son_exemple,
+    tables_mal_nommees as tables_mal_nommees,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────

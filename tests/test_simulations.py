@@ -304,10 +304,11 @@ def test_un_motif_lent_sur_beaucoup_de_fichiers_est_abandonne_aussi(tmp_path, mo
 
 
 def test_h10_maj_securite_ne_plante_pas_sans_projet_python(monkeypatch, capsys):
+    """Rien à mettre à jour sortait en code 1 : un script qui l'enchaîne tombait."""
     monkeypatch.setattr(config, "BACKEND", None)
     monkeypatch.setattr(config, "PY_RACINE", None)
 
-    assert lintorn.commandes.securite.maj_securite(appliquer=True) == 1
+    assert lintorn.commandes.securite.maj_securite(appliquer=True) == 0
     assert "Aucun code Python" in capsys.readouterr().out
 
 
@@ -782,6 +783,8 @@ def test_err4_la_memoire_d_un_projet_voisin_n_est_pas_auditee(tmp_path, monkeypa
     voisin.mkdir(parents=True)
     monkeypatch.setattr(config, "RACINE", projet)
     monkeypatch.setitem(config.ENV, "CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    # Celle du `.lintorn/.env` de ce dépôt passerait avant la recherche testée ici.
+    monkeypatch.delitem(config.ENV, "LINTORN_MEMOIRE", raising=False)
 
     memoire, origine = config._dossier_memoire()
 

@@ -5,6 +5,7 @@ import json
 import os
 import select
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -464,6 +465,110 @@ def _lintorn_dans_le_path(tmp_path, monkeypatch):
 
 
 @POSIX
+def test_lintorn_hook_dit_ce_qu_il_a_trouve_et_ce_qu_il_a_change(tmp_path, monkeypatch, capsys):
+    """« Hook installe » s'affichait aussi sur un hook déjà en place et à jour : on ne
+    savait pas s'il l'était avant."""
+    _depot(tmp_path, monkeypatch)
+    installer = lintorn.commandes.hook.installer_hook
+
+    assert installer() == 0
+    premiere = capsys.readouterr().out
+    assert installer() == 0
+    seconde = capsys.readouterr().out
+    (config.HOOKS / "version").write_text("lintorn 0.6.0\n", encoding="utf-8")
+    assert installer() == 0
+    troisieme = capsys.readouterr().out
+
+    assert "Hook installe" in premiere and "Hook branche" in premiere
+    assert "Hook deja a jour" in seconde and "Deja branche" in seconde
+    assert "Rien a changer." in seconde and "Hook installe" not in seconde
+    assert "Hook mis a jour" in troisieme and "a la place de lintorn 0.6.0" in troisieme
+    assert "[ OK ] Hook pre-push (Lintorn)" in seconde, "et ce qu'en dit le controle"
+
+
+@POSIX
+def test_juste_apres_la_pose_le_push_d_avant_n_est_pas_accuse(tmp_path, monkeypatch, capsys):
+    """Un script pousse, pose le hook dans la même seconde : « parti SANS Lintorn »
+    s'affichait sous « Hook installe », pour un push fait avant que le hook existe."""
+    depot = _depot(tmp_path, monkeypatch)
+    _pousser(depot, heure=int(time.time()))
+
+    assert lintorn.commandes.hook.installer_hook() == 0
+
+    sortie = capsys.readouterr().out
+    assert "Hook installe" in sortie and "parti SANS" not in sortie, sortie
+
+
+@POSIX
+def test_lintorn_hook_etat_dit_l_etat_sans_rien_toucher(tmp_path, monkeypatch, capsys):
+    """Savoir si le hook tourne sans le reposer : le code de sortie le dit à un script."""
+    _depot(tmp_path, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["lintorn", "hook", "--status"])
+
+    absent = Lintorn.main()
+    sortie = capsys.readouterr().out
+    rien_pose = not (config.HOOKS / "pre-push").exists()
+    assert lintorn.commandes.hook.installer_hook() == 0
+    capsys.readouterr()
+    branche = Lintorn.main()
+
+    assert absent == 1 and "pas encore installe" in sortie
+    assert "    lintorn hook" in sortie, "le detail dit quoi faire"
+    assert rien_pose, "--status ne pose rien"
+    assert branche == 0 and "[ OK ] Hook pre-push" in capsys.readouterr().out
+
+
+@POSIX
+def test_lintorn_hook_rm_debranche_et_retire_la_copie(tmp_path, monkeypatch, capsys):
+    """Défaire `lintorn hook` demandait de connaître la commande git."""
+    depot = _depot(tmp_path, monkeypatch)
+    assert lintorn.commandes.hook.installer_hook() == 0
+    capsys.readouterr()
+    monkeypatch.setattr("sys.argv", ["lintorn", "hook", "--rm"])
+
+    retire = Lintorn.main()
+    sortie = capsys.readouterr().out
+    encore = Lintorn.main()
+
+    assert retire == 0 and "Hook debranche" in sortie and "Copie retiree" in sortie
+    assert _hooks_path(depot) == ""
+    assert not (config.HOOKS / "pre-push").exists() and not (config.HOOKS / "version").exists()
+    assert encore == 0 and "Rien a retirer" in capsys.readouterr().out
+
+
+@POSIX
+def test_lintorn_hook_rm_rend_leur_place_aux_hooks_que_force_avait_remplaces(tmp_path, monkeypatch):
+    """Après `lintorn hook --force`, les hooks d'avant se taisaient : les retirer de
+    Lintorn les rend à git."""
+    depot = _depot(tmp_path, monkeypatch)
+    _un_hook(depot / "mes-hooks", "pre-push")
+    _git(depot, "config", "core.hooksPath", "mes-hooks")
+    assert lintorn.commandes.hook.installer_hook(forcer=True) == 0
+
+    assert lintorn.commandes.hook.retirer_hook() == 0
+
+    assert _hooks_path(depot) == "mes-hooks"
+
+
+@POSIX
+def test_lintorn_hook_rm_previent_quand_un_autre_hook_appelle_encore_lintorn(
+        tmp_path, monkeypatch, capsys):
+    """Sans la copie, ce hook s'arrêterait sur « not found » au prochain push."""
+    depot = _depot(tmp_path, monkeypatch)
+    _un_hook(depot / ".git" / "hooks", "pre-commit")
+    assert lintorn.commandes.hook.installer_hook() == 1           # pose le script, sans brancher
+    _un_hook(depot / ".git" / "hooks", "pre-push",
+             f'#!/bin/sh\n{lintorn.controles.outillage.hook_git.ligne_a_ajouter()}\n')
+    capsys.readouterr()
+
+    assert lintorn.commandes.hook.retirer_hook() == 0
+
+    sortie = capsys.readouterr().out
+    assert "Copie retiree" in sortie
+    assert ".git/hooks/pre-push appelle encore le hook de Lintorn" in sortie
+
+
+@POSIX
 def test_lintorn_hook_ne_fait_pas_taire_les_hooks_existants(tmp_path, monkeypatch, capsys):
     """`core.hooksPath` REMPLACE le dossier de hooks : un pre-commit écrit à la
     main (ou posé par l'outil pre-commit) cessait de tourner, sans un mot."""
@@ -670,6 +775,62 @@ def test_une_tentative_refusee_ne_couvre_pas_le_push_d_un_autre_commit(tmp_path,
     assert _verdict_du_hook(monkeypatch).statut == "ALERTE"
 
 
+def _deux_branches(tmp_path, monkeypatch, *, sous_pre_commit: bool, heure_du_push: int):
+    """`premiere` vérifiée par Lintorn à 10:00, puis `premiere` et `seconde` poussées d'un coup."""
+    hook_git = lintorn.controles.outillage.hook_git
+    depot = _depot(tmp_path, monkeypatch)
+    _un_hook(depot / ".git" / "hooks", "pre-commit", "#!/bin/sh\n# File generated by pre-commit\n")
+    heure = 1767261600                                                 # 10:00
+
+    class _Horloge(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls.fromtimestamp(heure, tz=tz or UTC)
+
+    monkeypatch.setattr(hook_git, "datetime", _Horloge)
+    _pousser(depot, heure=heure)
+    premiere = _commiter(depot)
+    _git(depot, "branch", "premiere")
+    _git(depot, "checkout", "-qb", "seconde")
+    _commiter(depot)
+    _git(depot, "checkout", "-q", "premiere")           # HEAD aussi est noté : pas seconde
+    monkeypatch.setenv("LINTORN_POUSSE", premiere)
+    if sous_pre_commit:
+        monkeypatch.setenv("PRE_COMMIT_TO_REF", premiere)
+    hook_git.noter_passage()
+    monkeypatch.delenv("LINTORN_POUSSE")
+    monkeypatch.delenv("PRE_COMMIT_TO_REF", raising=False)
+    env = {**os.environ, "GIT_COMMITTER_DATE": f"@{heure_du_push} +0000"}
+    subprocess.run(["git", "push", "-q", "origin", "premiere", "seconde"], cwd=depot, env=env,
+                   check=True, capture_output=True, start_new_session=True)
+    return _verdict_du_hook(monkeypatch)
+
+
+@POSIX
+def test_sous_pre_commit_un_push_de_deux_branches_dont_une_seule_est_verifiee_est_signale(
+        tmp_path, monkeypatch):
+    """pre-commit ne transmet que la première branche d'un push qui en envoie
+    plusieurs : Lintorn ne vérifiait qu'elle, et une seule branche vérifiée
+    suffisait à dire tout le push couvert."""
+    resultat = _deux_branches(tmp_path, monkeypatch, sous_pre_commit=True,
+                              heure_du_push=1767265200)                # 11:00
+
+    assert resultat.statut == "ALERTE", resultat.resume
+    assert "une partie de ton dernier push" in resultat.resume
+    assert "pousse-les une par une" in resultat.detail
+
+
+@POSIX
+def test_hors_pre_commit_une_autre_branche_dans_la_meme_seconde_est_un_autre_push(
+        tmp_path, monkeypatch):
+    """git donne toutes les branches au hook : celle qu'il n'a pas vue vient d'un
+    autre push, ici le tout premier, fait dans la seconde même par un script."""
+    resultat = _deux_branches(tmp_path, monkeypatch, sous_pre_commit=False,
+                              heure_du_push=1767261600)                # 10:00, même seconde
+
+    assert resultat.statut == "OK", resultat.resume
+
+
 @POSIX
 def test_un_no_verify_du_commit_refuse_reste_couvert(tmp_path, monkeypatch):
     """Le hook est branché : c'est ce push-là qui l'a contourné, en connaissance de cause."""
@@ -815,6 +976,81 @@ def test_le_bloc_conseille_garde_ce_qui_fait_parler_lintorn(
     assert lintorn.commandes.hook.installer_hook() == 1
 
     assert reglage in capsys.readouterr().out
+
+
+@POSIX
+def test_lefthook_lance_lintorn_par_un_script_pas_par_une_commande(tmp_path, monkeypatch, capsys):
+    """lefthook saute une commande quand il ne voit aucun fichier à pousser (une
+    branche où l'on n'est pas) : le push partait sans Lintorn. Un script tourne
+    à chaque push, depuis le dossier que dit `source_dir`."""
+    depot = _depot(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "SOMMET_GIT", depot)
+    (depot / "lefthook.yml").write_text('source_dir: "outils/hooks/"\n', encoding="utf-8")
+    _un_hook(depot / ".git" / "hooks", "pre-commit", "#!/bin/sh\n# call_lefthook\n")
+
+    assert lintorn.commandes.hook.installer_hook() == 1
+
+    sortie = capsys.readouterr().out
+    assert '  scripts:\n        "lintorn.sh":' in sortie, sortie
+    assert "commands:" not in sortie
+    assert "outils/hooks/pre-push/lintorn.sh :" in sortie
+    assert 'exec .lintorn/hooks/pre-push "$@"' in sortie
+
+
+@POSIX
+def test_lintorn_lance_par_une_commande_lefthook_est_signale(tmp_path, monkeypatch):
+    """L'ancien bloc conseillé (`run:`) : Lintorn tourne, mais pas à chaque push."""
+    depot = _depot(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "SOMMET_GIT", depot)
+    _un_hook(depot / ".git" / "hooks", "pre-commit", "#!/bin/sh\n# call_lefthook\n")
+    (depot / "lefthook.yml").write_text(
+        "pre-push:\n  commands:\n    lintorn:\n      run: .lintorn/hooks/pre-push\n"
+        "      use_stdin: true\n", encoding="utf-8")
+    _pousser(depot, heure=1767261600)
+    _passage("2026-01-01T10:30:00+00:00", _commiter(depot))
+
+    resultat = _verdict_du_hook(monkeypatch)
+
+    assert resultat.statut == "VERIF", resultat.resume
+    assert "par un script" in resultat.resume
+    assert '"lintorn.sh":' in resultat.detail
+
+
+@POSIX
+@pytest.mark.skipif(shutil.which("lefthook") is None, reason="lefthook absent")
+def test_le_bloc_conseille_a_lefthook_lance_lintorn_pour_une_branche_non_extraite(
+        tmp_path, monkeypatch):
+    """Le vrai lefthook, et le bloc tel que `lintorn hook` le donne."""
+    depot = _projet_js(tmp_path, monkeypatch, branche=False)
+    (depot / "lefthook.yml").write_text("pre-commit:\n  commands:\n    rien:\n      run: 'true'\n",
+                                        encoding="utf-8")
+    assert _git(depot, "config", "--unset", "core.hooksPath").returncode in (0, 5)
+    assert _git(depot, "-c", "core.hooksPath=.git/hooks", "status").returncode == 0
+    assert subprocess.run(["lefthook", "install"], cwd=depot, capture_output=True,
+                          check=False).returncode == 0
+    monkeypatch.setattr(config, "SOMMET_GIT", depot)
+    quoi = lintorn.controles.outillage.hook_git.conseil(
+        lintorn.controles.outillage.hook_git.autres_hooks())
+    with (depot / "lefthook.yml").open("a", encoding="utf-8") as flux:
+        flux.write(quoi.ajout + "\n")
+    quoi.script[0].parent.mkdir(parents=True)
+    quoi.script[0].write_text(quoi.script[1] + "\n", encoding="utf-8")
+    assert lintorn.commandes.hook.installer_hook() == 1           # pose le script de Lintorn
+    assert subprocess.run(["lefthook", "install"], cwd=depot, capture_output=True,
+                          check=False).returncode == 0
+    _git(depot, "add", "-A")
+    _git(depot, "commit", "-qm", "lefthook")
+    _envoyer(depot, "--no-verify")
+    _git(depot, "checkout", "-qb", "fonction")
+    _commit_fautif(depot)
+    _git(depot, "checkout", "-q", "-")
+
+    pousse = _git(depot, "push", "origin", "fonction")
+
+    sortie = pousse.stdout + pousse.stderr
+    assert "Lintorn controle avant push" in sortie, "une commande lefthook ne tournait pas ici"
+    assert "Lintorn OK" not in sortie, sortie
+    assert "SANS verification complete" in sortie and "f.js" in sortie, sortie
 
 
 def test_un_chemin_a_espace_reste_entier_dans_la_config_de_l_outil(tmp_path, monkeypatch):
@@ -1019,6 +1255,57 @@ def test_une_faute_de_frappe_dans_regles_toml_ne_fait_pas_dire_ok(tmp_path, monk
     assert "Lintorn OK" not in sortie
     assert "SANS verification complete" in sortie
     assert "regles.toml" in sortie, "dire POURQUOI"
+
+
+@POSIX
+@pytest.mark.parametrize("table", ["regle", "régles"])
+def test_une_table_mal_nommee_dans_regles_toml_ne_fait_pas_dire_ok(tmp_path, monkeypatch, table):
+    """`[[regle]]` au lieu de `[[regles]]` : la règle bloquante disparaissait sans un
+    mot, la ligne Configuration restait verte et le push fautif partait sur « Lintorn OK ».
+    `[[régles]]` rend même le fichier illisible : le dire en français, avec la ligne."""
+    depot = _projet_js(tmp_path, monkeypatch)
+    regles = depot / ".lintorn" / "regles.toml"
+    regles.write_text(regles.read_text(encoding="utf-8") + "\n" + _REGLE_EVAL.replace(
+        "[[regles]]", f"[[{table}]]").replace("Pas eval", "Pas de debugger").replace(
+        "eval\\(", "debugger"), encoding="utf-8")
+    (depot / "f.js").write_text("debugger;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=depot, check=True)
+    subprocess.run(["git", "commit", "-qm", "fautif"], cwd=depot, check=True)
+
+    pousse = _envoyer(depot)
+
+    sortie = pousse.stdout + pousse.stderr
+    assert "Lintorn OK" not in sortie, sortie
+    assert "SANS verification complete" in sortie
+    assert f"[[{table}]] n'est pas lu - ecris [[regles]]" in sortie, "la faute, et la bonne ecriture"
+
+
+@POSIX
+def test_pousser_la_seule_version_d_un_sous_module_dit_ok(tmp_path, monkeypatch):
+    """Le push n'envoie que la version du sous-module, son code part dans son
+    propre dépôt : « aucun controle ne lit ces fichiers : lib », à chaque fois."""
+    lib = tmp_path.parent / f"{tmp_path.name}-lib"
+    lib.mkdir()
+    _git(lib, "init", "-q")
+    (lib / "outil.js").write_text("console.log(1);\n", encoding="utf-8")
+    _git(lib, "add", "-A")
+    _git(lib, "commit", "-qm", "un")
+    depot = _projet_js(tmp_path, monkeypatch)
+    assert _git(depot, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib),
+                "lib").returncode == 0
+    _git(depot, "commit", "-qm", "sous-module")
+    assert _envoyer(depot, "--no-verify").returncode == 0
+    (depot / "lib" / "outil.js").write_text("console.log(2);\n", encoding="utf-8")
+    _git(depot / "lib", "commit", "-qam", "deux")
+    _git(depot, "add", "lib")
+    _git(depot, "commit", "-qm", "monte lib")
+
+    pousse = _envoyer(depot)
+
+    sortie = pousse.stdout + pousse.stderr
+    assert pousse.returncode == 0, sortie
+    assert "Lintorn OK" in sortie, sortie
+    assert "sous-module" in sortie
 
 
 @POSIX
@@ -1230,6 +1517,56 @@ def test_une_tentative_refusee_dans_la_meme_seconde_garde_le_push_verifie(tmp_pa
     _envoyer(depot, heure=heure)                # …qui part, à cette seconde-là
     monkeypatch.setenv("LINTORN_POUSSE", _commiter(depot))
     hook_git.noter_passage()                    # puis une tentative refusée, même seconde
+
+    assert _verdict_du_hook(monkeypatch).statut == "OK"
+
+
+@POSIX
+def test_un_push_sans_lintorn_dans_la_seconde_de_son_passage_n_est_pas_couvert(tmp_path,
+                                                                               monkeypatch):
+    """Les heures comparées avec `>=` : un autre commit, poussé sans Lintorn dans
+    la seconde même de son dernier passage, passait pour vérifié."""
+    hook_git = lintorn.controles.outillage.hook_git
+    depot = _depot(tmp_path, monkeypatch)
+    _un_hook(depot / ".git" / "hooks", "pre-commit")
+    heure = 1767261600
+
+    class _Horloge(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls.fromtimestamp(heure, tz=tz or UTC)
+
+    monkeypatch.setattr(hook_git, "datetime", _Horloge)
+    monkeypatch.setenv("LINTORN_POUSSE", _commiter(depot))
+    hook_git.noter_passage()                    # Lintorn vérifie ce commit…
+    _commiter(depot)
+    _envoyer(depot, heure=heure)                # …un autre part sans lui, même seconde
+
+    resultat = _verdict_du_hook(monkeypatch)
+    assert resultat.statut == "ALERTE", resultat.resume
+    assert "est parti SANS Lintorn" in resultat.resume
+
+
+@POSIX
+def test_pendant_un_push_le_push_d_avant_dans_la_meme_seconde_n_est_pas_accuse(tmp_path,
+                                                                             monkeypatch):
+    """Un script qui pose le hook et pousse dans la seconde de son premier push :
+    le passage noté par CE lancement vient après, et le push d'avant était accusé."""
+    hook_git = lintorn.controles.outillage.hook_git
+    depot = _depot(tmp_path, monkeypatch)
+    _un_hook(depot / ".git" / "hooks", "pre-commit")
+    heure = 1767261600
+
+    class _Horloge(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls.fromtimestamp(heure, tz=tz or UTC)
+
+    monkeypatch.setattr(hook_git, "datetime", _Horloge)
+    _pousser(depot, heure=heure)                # sans Lintorn, à cette seconde-là
+    monkeypatch.setenv("LINTORN_HOOK", "1")
+    monkeypatch.setenv("LINTORN_POUSSE", _commiter(depot))
+    hook_git.noter_passage()                    # puis Lintorn, pendant le push suivant
 
     assert _verdict_du_hook(monkeypatch).statut == "OK"
 

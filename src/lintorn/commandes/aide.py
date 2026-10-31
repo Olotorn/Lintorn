@@ -8,26 +8,44 @@ from .. import __version__
 AIDE = """lintorn : audite le code d'un projet ET la memoire que lit l'assistant IA.
 
 USAGE
-    lintorn                      audit complet
+    lintorn                      audit complet : ta doc, et tous les outils
+                                 actifs (ruff, osv-scanner...)
     lintorn rapide               sans les outils lents (ce que lance le hook)
     lintorn doc                  uniquement : la documentation ment-elle ?
     lintorn --fichiers a.py b.ts + un focus sur ces fichiers
+
+OU EN EST-ON (rien n'est lance ni modifie)
+    lintorn status               le hook, l'accord, la config, ce qui est
+                                 controle, les derniers rapports
+    lintorn rapport              ouvre le dernier rapport dans le navigateur
+    lintorn rapport-push         ouvre celui du dernier push
 
 MISE EN PLACE
     lintorn init                 genere .lintorn/config.toml pour ce projet
     lintorn regles               prepare un [[regles]] par regle de ta doc
                                  qui n'a pas encore de controle
+    lintorn regles --test        essaie chaque regle, et son `exemple`
+    lintorn corrige              repare les fautes de frappe de regles.toml
+                                 et config.toml ([[regle]], bloquan...),
+                                 apres t'avoir montre chaque correction
     lintorn hook                 installe le hook pre-push (sans faire taire
-                                 les hooks que le projet a deja)
+                                 les hooks que le projet a deja), ou le met
+                                 a jour, et dit ce qu'il a change
+    lintorn hook --status        dit si le hook tourne, sans rien toucher
+    lintorn hook --rm            le debranche et le retire
     lintorn confiance            autorise Lintorn a lancer ses outils dans ce
                                  projet (il le demande de lui-meme, une fois)
+    lintorn confiance --rm       retire cet accord, pour ce projet
     lintorn outils               regarde ce que contient le projet, installe
                                  les outils qui s'y appliquent et propose
                                  d'activer ses audits, un par un
 
 SECURITE
-    lintorn pip-audit            ce que pip-audit propose (simulation)
-    lintorn pip-audit --appliquer        installe et repingle vraiment
+    Les failles connues (pip-audit, npm audit, osv-scanner) sont cherchees
+    par l'audit complet, une fois activees avec `lintorn outils`.
+    lintorn pip-audit            repare : les paquets Python que pip-audit
+                                 signale, a mettre a jour (simulation)
+    lintorn pip-audit --appliquer        les met a jour et repingle vraiment
 
 DIVERS
     lintorn guide                la notice : a quoi ca sert, comment lire
@@ -42,7 +60,7 @@ CONFIGURATION
     nouveau. Il n'execute pas ton code, n'ouvre pas ta base et ne sort pas
     sur le reseau tant que tu ne l'as pas active.
 
-    https://gitlab.com/DamXs/lintorn"""
+    https://gitlab.com/olotorn/lintorn"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107,7 +125,7 @@ GUIDE = """
 3. LES TROIS COMMANDES QUI SERVENT
 
    lintorn init               met en place la configuration
-   lintorn                    l'audit complet
+   lintorn                    l'audit complet, outils actifs compris
    lintorn hook               Lintorn tourne avant chaque `git push`
 
 4. LES DEUX FICHIERS

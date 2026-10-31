@@ -3,8 +3,8 @@
 
 from importlib import import_module
 
-__all__ = ["aide", "audit", "confiance", "dossier_lintorn", "hook", "init", "outils", "regles",
-           "securite"]
+__all__ = ["aide", "audit", "confiance", "corrige", "dossier_lintorn", "hook", "init", "outils",
+           "rapport", "regles", "securite", "status"]
 
 
 def __getattr__(nom: str):

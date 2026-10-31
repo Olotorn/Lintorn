@@ -214,7 +214,8 @@ class Resultat:
     def __init__(self, titre: str, statut: str, resume: str, detail: str = "",
                  bloquant: bool = True, detail_markdown: bool = False,
                  detail_meme_au_vert: bool = False, code_sortie: int | None = None,
-                 fichiers: dict[str, str] | None = None, dossier: Path | None = None):
+                 fichiers: dict[str, str] | None = None, dossier: Path | None = None,
+                 rappel: bool = False):
         self.titre = titre
         self.statut = statut
         self.resume = resume
@@ -240,6 +241,9 @@ class Resultat:
         # Le dossier où l'outil a tourné : c'est de là qu'il nomme ses
         # fichiers. Un traducteur en a besoin pour les ramener à la racine.
         self.dossier = dossier
+        # True : un outil qui n'a PAS tourné redit ce qu'il avait trouvé la
+        # dernière fois. Le verdict le nomme ; rien ne le compte comme vérifié.
+        self.rappel = rappel
 
     @property
     def en_echec(self) -> bool:

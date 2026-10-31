@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 from .. import base, chemins, config
-from ..controles.projet import regles_enoncees
+from ..base import MARQUEUR
+from ..controles.projet import regles_enoncees, regles_maison
 from . import dossier_lintorn
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -22,6 +24,10 @@ from . import dossier_lintorn
 #    etre inerte tant que l'humain n'y a pas mis la main.
 _RX_MARKDOWN = re.compile(r"[`*_]+")
 _RX_SUFFIXE = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,4}$")
+# Ni guillemet ni barre oblique inverse : l'ancre s'écrit telle quelle dans
+# une chaîne TOML. Le `_` reste, il fait partie des noms cités.
+_RX_HORS_ANCRE = re.compile(r'[`*"\\|]')
+_RX_SOURCE_ECRITE = re.compile(r"""source\s*=\s*(["'])(.+?)\1""")
 
 
 def _nom_de_regle(phrase: str) -> str:
@@ -44,17 +50,39 @@ def _suffixes_probables(jetons: list[str]) -> list[str]:
     return sorted(trouves)
 
 
+def _source(chemin: str, numero: int, phrase: str, enoncees) -> str:
+    """La `source` d'une esquisse : le plus court début de phrase qui ne
+    désigne que cette règle.
+
+    Dans un tableau, le sujet (la première cellule) passe d'abord : « Zéro
+    dépendance » se relit mieux que dix mots de phrase. Deux lignes
+    identiques n'ont pas d'ancre possible : on retombe sur le numéro.
+    """
+    mots = _RX_HORS_ANCRE.sub(" ", phrase).split()
+    candidats = [" ".join(mots[:n]) for n in range(min(3, len(mots)), len(mots) + 1)]
+    if "|" in phrase:
+        candidats.insert(0, " ".join(_RX_HORS_ANCRE.sub(" ", phrase.partition("|")[0]).split()))
+    for candidat in candidats:
+        source = f"{chemin}#{candidat}"
+        if regles_enoncees.ligne_designee(source, enoncees)[0] == f"{chemin}:{numero}":
+            return source
+    return f"{chemin}:{numero}"
+
+
 def esquisses_regles(deja_ecrit: str = "") -> list[str]:
     """Un bloc `[[regles]]` commente par regle enoncee mais non controlee.
 
-    `deja_ecrit` : le contenu actuel du config.toml. Une regle dont le
-    `source` y figure deja est sautee — sans quoi deux passages
+    `deja_ecrit` : le contenu actuel du regles.toml. Une regle qu'une
+    `source` y designe deja est sautee, sans quoi deux passages
     empileraient deux fois les memes brouillons.
     """
+    enoncees = regles_enoncees.regles_enoncees()
+    deja = {regles_enoncees.ligne_designee(source, enoncees)[0]
+            for _, source in _RX_SOURCE_ECRITE.findall(deja_ecrit)}
     manquantes = [
         (chemin, numero, phrase, jetons)
         for chemin, numero, phrase, jetons in regles_enoncees.regles_sans_controle()
-        if f'"{chemin}:{numero}"' not in deja_ecrit
+        if f"{chemin}:{numero}" not in deja
     ]
     if not manquantes:
         return []
@@ -69,6 +97,9 @@ def esquisses_regles(deja_ecrit: str = "") -> list[str]:
         "# positifs — de quoi cesser de faire confiance au rapport.",
         "#",
         "# Decommente celles qui comptent, ecris leur `motif`, jette les autres.",
+        "# Une regle qu'aucun motif ne peut exprimer (« une seule session a la",
+        "# fois ») : remplis `hors_portee` a la place, avec ta raison. Une seule",
+        "# des deux lignes, l'autre reste vide.",
         "#",
         "# `source` evite de RECOPIER la phrase ici : la regle reste enoncee a un",
         "# seul endroit, et Lintorn sait qu'elle a desormais un controle.",
@@ -81,11 +112,14 @@ def esquisses_regles(deja_ecrit: str = "") -> list[str]:
             "",
             f"# {phrase[:100]}",
             "# [[regles]]",
-            f'# source   = "{chemin}:{numero}"',
-            f'# nom      = "{_nom_de_regle(phrase)}"',
+            f'# source   = "{_source(chemin, numero, phrase, enoncees)}"',
+            # Échappé comme une chaîne TOML : le `\` d'un `C:\Users` cité rendait
+            # regles.toml illisible une fois décommenté, et TOUTES les règles tombaient.
+            f"# nom      = {json.dumps(_nom_de_regle(phrase), ensure_ascii=False)}",
             '# racine   = "."          # <- restreins au dossier concerne',
             f"# suffixes = [{rendu}]{indice}",
             "# motif    = ''            # <- A ECRIRE : ce qui repere une VIOLATION",
+            "# hors_portee = ''         # <- OU : pourquoi aucun motif ne peut l'exprimer",
             "# bloquant = false         # true quand la regle est deja tenue partout",
         ]
     return lignes
@@ -95,7 +129,7 @@ def contenu_regles_toml(esquisses: list[str]) -> str:
     """L'en-tete de `regles.toml`, suivi des esquisses ou d'un exemple."""
     lignes = [
         "# Les regles maison de ce projet.",
-        "#   https://gitlab.com/DamXs/lintorn",
+        "#   https://gitlab.com/olotorn/lintorn",
         "#",
         "# Un fichier a part parce qu'il VIT : il grossit, on l'edite souvent,",
         "# on le relit a plusieurs. `config.toml`, a cote, est un reglage qu'on",
@@ -161,6 +195,13 @@ def esquisser_regles() -> int:
         print(f"Echec : {cible.name} illisible ({erreur})")
         return 1
     dossier_lintorn.poser_gitignore_interne(cible.parent)
+    # Corriger n'est pas son métier : il ajoute des brouillons, `lintorn corrige`
+    # répare. Mais un `[[regle]]` mal écrit ne compte pour rien : le dire d'abord.
+    mal_nommees = config.tables_mal_nommees(deja)
+    if mal_nommees:
+        print(f"{cible.name} : {len(mal_nommees)} table(s) que Lintorn ne lit pas "
+              f"(ligne {', '.join(str(numero) for numero, *_ in mal_nommees)}) : lintorn corrige")
+        print()
 
     esquisses = esquisses_regles(deja)
     if not esquisses:
@@ -196,4 +237,103 @@ def esquisser_regles() -> int:
     print("    1. ouvre le fichier : garde ce qui compte, jette le reste")
     print("    2. pour chaque regle gardee : decommente, puis ecris le `motif`")
     print("    3. `lintorn` pour verifier")
+    # Une `source` qui ne désigne plus rien ne dit pas quelle règle elle visait :
+    # son brouillon revient, en double de la règle qui existe déjà.
+    recaler = regles_enoncees.sources_a_recaler(regles_enoncees.regles_enoncees())
+    if recaler:
+        print()
+        print(f"ATTENTION : {len(recaler)} regle(s) deja ecrite(s) ont une `source` qui ne "
+              "designe plus rien.")
+        print("Si l'une d'elles couvrait une des phrases ci-dessus, recale sa `source`")
+        print("et jette le brouillon au lieu d'ecrire la regle deux fois :")
+        for nom, source, pourquoi in recaler:
+            print(f"    - {nom} ({source}) : {pourquoi}")
     return 0
+
+
+def tester() -> int:
+    """`lintorn regles --test` : chaque règle, une par une, et ses `exemple`.
+
+    Le contrôle « Regles maison » juge le PROJET ; ceci juge les RÈGLES. Une
+    règle qui ne lit rien, ne finit pas, ou ne trouve pas son propre exemple
+    ne protège rien, et rend le code 1. Une règle qui trouve des fautes
+    MARCHE : ce qu'elle trouve est dit, c'est au projet de le corriger.
+    """
+    regles = config.REGLES_MAISON
+    # L'exemple raté d'une règle chargée est dit sous elle, pas une seconde fois ici.
+    deja_dits = tuple(f"{regle['nom']} : son exemple" for regle in regles)
+    soucis = [souci for souci in config.SOUCIS_CONFIG if not souci.startswith(deja_dits)]
+    if not regles and not config.HORS_PORTEE and not soucis:
+        print("Aucune regle a tester : regles.toml n'en declare aucune (lintorn regles en prepare).")
+        return 0
+
+    cassees = 0
+    index: dict = {}
+    illisibles: set[str] = set()
+    for regle in regles:
+        statut, notes = _tester_une(regle, regles_maison.juger(regle, index, illisibles, set()))
+        cassees += statut == "ALERTE"
+        fichier, ligne = regle["ou"]
+        print(f"{MARQUEUR[statut]} {regle['nom']}" + (f"  ({fichier}:{ligne})" if fichier else ""))
+        for note in notes:
+            print(f"       {note}")
+    for decl in config.HORS_PORTEE:
+        print(f"{MARQUEUR['INDISPONIBLE']} {decl['nom']}  hors_portee : aucun motif a tester")
+
+    if soucis:
+        print()
+        print(f"Ce que Lintorn n'a pas pu charger ({len(soucis)}) :")
+        for souci in soucis:
+            print(f"    - {souci}")
+    print()
+    if cassees or soucis:
+        print(f"{cassees + len(soucis)} probleme(s) : ces regles ne protegent pas ce que tu crois.")
+        return 1
+    sans_exemple = sum(1 for regle in regles if not regle["exemples"])
+    if sans_exemple:
+        print(f"Les {len(regles)} regle(s) a motif tournent, mais {sans_exemple} sans `exemple` :")
+        print("rien ne prouve qu'elles savent trouver une faute. Donne a chacune un texte fautif.")
+        return 0
+    print(f"Les {len(regles)} regle(s) a motif marchent : chacune trouve son exemple.")
+    return 0
+
+
+def _tester_une(regle: dict, jugement) -> tuple[str, list[str]]:
+    """(statut, ce qu'il faut en dire) d'une règle qui vient de tourner."""
+    notes = []
+    statut = "OK"
+    if jugement.abandon:
+        statut = "ALERTE"
+        notes.append(jugement.abandon)
+    elif not jugement.lus:
+        statut = "ALERTE"
+        suffixes = ", ".join(regle["suffixes"]) or "(aucun suffixe declare)"
+        ou = chemins.relatif(regle["racine"])
+        notes.append(f"{jugement.illisibles_ici} fichier(s) en {suffixes} sous {ou}/ ILLISIBLE(S)"
+                     if jugement.illisibles_ici else
+                     f"ne lit aucun fichier : rien en {suffixes} sous {ou}/ qui ne soit exclu")
+    elif regle["si"] is not None and not jugement.applicables:
+        statut = "VERIF"
+        notes.append(f"lit {jugement.lus} fichier(s), mais son `si` n'apparait dans aucun")
+    elif jugement.par_fichier:
+        trouves = sorted(jugement.par_fichier)
+        quoi = ("manque dans" if regle["requis"]
+                else f"{sum(jugement.par_fichier.values())} occurrence(s) dans")
+        notes.append(f"lit {jugement.lus} fichier(s), {quoi} {len(trouves)} : "
+                     + ", ".join(trouves[:3]) + (" ..." if len(trouves) > 3 else ""))
+    else:
+        notes.append(f"lit {jugement.lus} fichier(s) : rien trouve")
+
+    rates = [config.rate_son_exemple(regle, exemple) for exemple in regle["exemples"]]
+    if not regle["exemples"]:
+        if statut == "OK":
+            statut = "VERIF"
+        notes.append("sans `exemple` : rien ne prouve qu'elle sait trouver une faute")
+    elif any(rates):
+        statut = "ALERTE"
+        notes += [f"son exemple {numero if len(rates) > 1 else ''}".rstrip() + f" {raison}"
+                  for numero, raison in enumerate(rates, 1) if raison]
+    else:
+        notes.append("son exemple est attrape" if len(rates) == 1
+                     else f"ses {len(rates)} exemples sont attrapes")
+    return statut, notes

@@ -342,4 +342,11 @@ def installer_outils(sans_demander: bool = False) -> int:
     elif not proposables and en_ordre:
         print("\nTout ce qui s'applique ici est installe et actif. Rien a faire.")
 
+    # Activer ne lance rien : sans la commande à taper, on croyait que Lintorn
+    # ne savait lancer que pip-audit, la seule à porter un nom d'outil.
+    if any(outil["present"] and (outil["actif"] or outil["cle"] in acceptees)
+           for outil in outils):
+        print("\nPour les lancer : lintorn (l'audit complet).")
+        print("lintorn rapide, et donc le hook, saute les plus lents.")
+
     return 0 if en_ordre else 1

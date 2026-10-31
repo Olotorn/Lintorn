@@ -9,10 +9,16 @@ from __future__ import annotations
 import datetime
 import os
 import subprocess
+import time
+
+import pytest
 
 from lintorn import config, noyau
 
 HIER = datetime.date.today() - datetime.timedelta(days=1)
+# Sous Windows, `st_ctime` est l'heure de création : la fraîcheur n'y lit que
+# l'heure de modification, qu'une copie peut reculer.
+SANS_WINDOWS = pytest.mark.skipif(os.name == "nt", reason="st_ctime = heure de creation")
 
 
 def _git(projet, *arguments, date: str | None = None):
@@ -129,18 +135,93 @@ def test_du_code_cite_modifie_sans_commit_rend_la_fiche_suspecte(tmp_path, monke
     assert "app.py" in resultat.detail
 
 
+def _relire(memoire, cite: str = "`app.py`") -> None:
+    """La fiche relue maintenant : ce qui a été écrit avant tombe dans la seconde d'avant.
+
+    De vraies heures, jamais un `os.utime` : la fraîcheur ne croit pas une
+    heure de modification qu'on peut reculer.
+    """
+    time.sleep(1.1)
+    (memoire / "fiche.md").write_text(
+        f"---\nname: x\nverifie_le: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n---\n"
+        f"Le code vit dans {cite}.\n", encoding="utf-8")
+
+
 def test_une_modification_anterieure_a_la_relecture_ne_compte_pas(tmp_path, monkeypatch):
     """Modifié AVANT la relecture, même pas commité : la fiche a été relue après."""
-    projet, memoire = _projet(tmp_path, monkeypatch, {"app.py": "a = 1\n"},
-                              date=f"{HIER} 08:00:00")
+    projet, memoire = _projet(tmp_path, monkeypatch, {"app.py": "a = 1\n"})
     (projet / "app.py").write_text("a = 2\n", encoding="utf-8")
-    avant = datetime.datetime.fromisoformat(f"{HIER}T08:30").timestamp()
-    os.utime(projet / "app.py", (avant, avant))
-    _fiche(memoire, f"{HIER} 09:00")
+    _relire(memoire)
 
     resultat = _fraicheur(monkeypatch)
 
     assert resultat.statut == "OK", resultat.detail
+
+
+@SANS_WINDOWS
+def test_une_vieille_copie_posee_apres_la_relecture_rend_la_fiche_suspecte(tmp_path, monkeypatch):
+    """`cp -p` pose l'heure de la source : un fichier remplacé après la relecture
+    par une copie de trois jours passait pour écrit avant elle."""
+    projet, memoire = _projet(tmp_path, monkeypatch, {"app.py": "a = 1\n", "b.py": "b = 1\n"})
+    _relire(memoire, "`app.py` et `b.py`")
+    trois_jours = time.time() - 3 * 86400
+    for nom in ("app.py", "b.py"):
+        (projet / nom).write_text("vieille = True\n", encoding="utf-8")
+        os.utime(projet / nom, (trois_jours, trois_jours))
+    _git(projet, "commit", "-qm", "copie", "--", "app.py")
+
+    resultat = _fraicheur(monkeypatch)
+
+    assert resultat.statut == "VERIF"
+    assert "1 commit(s) depuis" in resultat.detail, resultat.detail
+    assert "pas encore commite" in resultat.detail, "b.py, copie pas commitee"
+
+
+def test_le_commit_d_un_collegue_tire_apres_la_relecture_la_rend_suspecte(tmp_path, monkeypatch):
+    """`git log --since` lit la date du commit : celui d'un collègue, fait avant
+    la relecture et tiré après, laissait la fiche fraîche pour toujours."""
+    projet, memoire = _projet(tmp_path, monkeypatch, {"app.py": "a = 1\n"})
+    collegue = tmp_path / "collegue"
+    _git(tmp_path, "clone", "-q", str(projet), str(collegue))
+    (collegue / "app.py").write_text("a = 'collegue'\n", encoding="utf-8")
+    _git(collegue, "commit", "-qam", "collegue")
+    _relire(memoire)
+    _git(projet, "pull", "-q", "--ff-only", str(collegue), "HEAD")
+
+    resultat = _fraicheur(monkeypatch)
+
+    assert resultat.statut == "VERIF", resultat.detail
+    assert "change(s) par git depuis" in resultat.detail
+    assert "`app.py`" in resultat.detail
+
+
+def test_un_fichier_seulement_deplace_apres_la_relecture_ne_compte_pas(tmp_path, monkeypatch):
+    """`git mv` change l'heure du fichier, pas son contenu : le journal de git le sait."""
+    projet, memoire = _projet(tmp_path, monkeypatch, {"app.py": "a = 1\n"})
+    _relire(memoire)
+    (projet / "src").mkdir()
+    _git(projet, "mv", "app.py", "src/app.py")
+    _git(projet, "commit", "-qm", "deplace")
+
+    resultat = _fraicheur(monkeypatch)
+
+    assert resultat.statut == "OK", resultat.detail
+
+
+def test_sans_journal_de_git_les_dates_des_commits_comptent(tmp_path, monkeypatch):
+    """Un clone plus récent que la relecture, ou un journal coupé : on ne sait
+    pas où était HEAD, et un commit daté d'après la relecture compte."""
+    projet, memoire = _projet(tmp_path, monkeypatch, {"app.py": "a = 1\n"})
+    _git(projet, "config", "core.logAllRefUpdates", "false")
+    _git(projet, "reflog", "expire", "--expire=all", "--all")
+    _relire(memoire)
+    (projet / "app.py").write_text("a = 2\n", encoding="utf-8")
+    _git(projet, "commit", "-qam", "deux")
+
+    resultat = _fraicheur(monkeypatch)
+
+    assert resultat.statut == "VERIF", resultat.detail
+    assert "1 commit(s) depuis" in resultat.detail
 
 
 def test_une_date_sans_heure_compte_toute_la_journee(tmp_path, monkeypatch):
@@ -163,6 +244,35 @@ def test_l_heure_ecrite_ne_compte_que_ce_qui_suit(tmp_path, monkeypatch):
     resultat = _fraicheur(monkeypatch)
 
     assert resultat.statut == "OK", resultat.detail
+
+
+def _relu_puis_commite(tmp_path, monkeypatch, avant: list[str], apres: list[str]):
+    """Les fichiers `avant` réécrits avant la relecture, `apres` après, puis un seul commit."""
+    projet, memoire = _projet(tmp_path, monkeypatch, {"app.py": "a = 1\n", "b.py": "b = 1\n"})
+    for nom in avant:
+        (projet / nom).write_text("change = True\n", encoding="utf-8")
+    _relire(memoire, "`app.py` et `b.py`")
+    for nom in apres:
+        (projet / nom).write_text("change = True\n", encoding="utf-8")
+    _git(projet, "commit", "-qam", "deux")
+    return _fraicheur(monkeypatch)
+
+
+def test_le_commit_de_ce_que_la_fiche_a_relu_ne_la_rend_pas_suspecte(tmp_path, monkeypatch):
+    """Une fiche datée avant le commit qu'elle décrit devenait suspecte juste
+    après lui : on finissait par ne plus la dater du tout."""
+    resultat = _relu_puis_commite(tmp_path, monkeypatch, avant=["app.py"], apres=[])
+
+    assert resultat.statut == "OK", resultat.detail
+
+
+def test_le_commit_de_ce_qui_a_change_apres_la_relecture_compte(tmp_path, monkeypatch):
+    resultat = _relu_puis_commite(tmp_path, monkeypatch, avant=["app.py"], apres=["b.py"])
+
+    assert resultat.statut == "VERIF"
+    assert "1 commit(s) depuis" in resultat.detail
+    assert "`b.py`" in resultat.detail
+    assert "`app.py`" not in resultat.detail, "app.py n'a pas bouge depuis la relecture"
 
 
 def test_une_date_impossible_n_est_pas_une_date(tmp_path, monkeypatch):

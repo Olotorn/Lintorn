@@ -66,15 +66,20 @@ def test_regles_illisible_est_annonce(tmp_path, monkeypatch, capsys):
 
 def test_pytest_lance_par_lintorn_ne_laisse_aucun_cache_dans_le_projet(tmp_path, monkeypatch):
     """`.pytest_cache/` et `__pycache__/` sont des écritures DANS le projet audité."""
-    (tmp_path / "test_x.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+    projet = tmp_path / "projet"
+    projet.mkdir()
+    (projet / "test_x.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
     monkeypatch.setattr(config, "PYTHON", sys.executable)
-    monkeypatch.setattr(config, "PY_RACINE", tmp_path)
+    monkeypatch.setattr(config, "PY_RACINE", projet)
+    # Le bilan JUnit va dans `.lintorn/cache/` : sans ce dossier à part, il
+    # s'écrivait dans le `.lintorn/` du dépôt qui lance ces tests.
+    monkeypatch.setattr(config, "DOSSIER_LINTORN", tmp_path / ".lintorn")
     entree = outil_pytest.commande()
 
     resultat = base.lancer(entree["titre"], entree["cmd"], entree["cwd"])
 
     assert resultat.statut == "OK", resultat.resume
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["test_x.py"]
+    assert sorted(p.name for p in projet.iterdir()) == ["test_x.py"]
 
 
 def test_tsc_range_son_cache_dans_lintorn(tmp_path, monkeypatch):
